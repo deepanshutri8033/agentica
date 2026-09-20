@@ -2,7 +2,14 @@
 
 import * as React from "react";
 import type { CreatedAgentType } from "./createAgent";
-import { CalendarCheck2Icon, Pencil, MoreHorizontal, Play, PauseIcon, Trash } from "lucide-react";
+import {
+  CalendarCheck2Icon,
+  Pencil,
+  MoreHorizontal,
+  Play,
+  PauseIcon,
+  Trash,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -16,19 +23,23 @@ import AgentEditSheet from "./AgentEditSheet";
 
 type Props = {
   createdAgent: CreatedAgentType | null;
+  setUpdatedAgent?: (agent: CreatedAgentType) => void;
 };
 
-function NewAgentCard({ createdAgent }: Props) {
+function NewAgentCard({ createdAgent, setUpdatedAgent }: Props) {
   if (!createdAgent) return null;
 
   return (
     <div className="p-4 border rounded-2xl bg-card shadow-sm flex items-start gap-4 justify-between">
       {/* Left side: Avatar + Info */}
       <div className="flex items-start gap-4">
-        {/* Avatar */}
         <div className="h-16 w-16 p-2 bg-muted/40 border rounded-2xl flex items-center justify-center shrink-0">
           <img
-            src={createdAgent.agentImage}
+            key={createdAgent.agentImage}
+            src={
+              createdAgent.agentImage ||
+              `https://api.dicebear.com/10.x/micah/svg?seed=${createdAgent.name || "agent"}`
+            }
             alt={createdAgent.name || "Agent Avatar"}
             width={48}
             height={48}
@@ -36,7 +47,6 @@ function NewAgentCard({ createdAgent }: Props) {
           />
         </div>
 
-        {/* Content */}
         <div className="flex flex-col">
           <div className="flex items-center gap-2">
             <h2 className="font-semibold text-base text-foreground">
@@ -51,7 +61,6 @@ function NewAgentCard({ createdAgent }: Props) {
             {createdAgent.description}
           </p>
 
-          {/* Schedule Line */}
           <div className="flex gap-5 text-muted-foreground text-sm items-center mt-2.5">
             <div className="flex gap-2 items-center">
               <CalendarCheck2Icon className="h-4 w-4" />
@@ -62,9 +71,12 @@ function NewAgentCard({ createdAgent }: Props) {
         </div>
       </div>
 
-      {/* Right side: Action icons (Pencil & More) */}
+      {/* Right side: Actions */}
       <div className="flex items-center gap-1 text-muted-foreground">
-        <AgentEditSheet agentConfig={createdAgent}>
+        <AgentEditSheet
+          agentConfig={createdAgent}
+          setUpdatedAgent={setUpdatedAgent}
+        >
           <div className="h-8 w-8 inline-flex items-center justify-center rounded-md hover:bg-accent hover:text-foreground transition-colors cursor-pointer">
             <Pencil className="h-4 w-4" />
           </div>
@@ -82,7 +94,10 @@ function NewAgentCard({ createdAgent }: Props) {
               <DropdownMenuItem className="cursor-pointer">
                 <PauseIcon className="mr-2 h-4 w-4" /> Pause Agent
               </DropdownMenuItem>
-              <AgentEditSheet agentConfig={createdAgent}>
+              <AgentEditSheet
+                agentConfig={createdAgent}
+                setUpdatedAgent={setUpdatedAgent}
+              >
                 <div className="relative flex cursor-pointer select-none items-center rounded-sm px-2 py-1.5 text-sm outline-none transition-colors hover:bg-accent hover:text-accent-foreground w-full">
                   <Pencil className="mr-2 h-4 w-4" /> Edit Agent
                 </div>

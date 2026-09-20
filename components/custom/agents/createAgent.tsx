@@ -275,7 +275,10 @@ function CreateAgent() {
             />
           )}
           {configResult.status === "ready" && (
-            <NewAgentCard createdAgent={createdAgent} />
+            <NewAgentCard
+              createdAgent={createdAgent}
+              setUpdatedAgent={(val) => setCreatedAgent({ ...val })}
+            />
           )}
         </div>
       )}

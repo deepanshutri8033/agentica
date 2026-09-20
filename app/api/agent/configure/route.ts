@@ -5,6 +5,7 @@ import { AgentConfigRespSchema } from "@/data/responseSchema";
 import { currentUser } from "@clerk/nextjs/server";
 import { db } from "@/db"; // Adjust this path if your db instance lives in @/configs/db or @/db/index
 import { AgentConfig } from "@/db/schema";
+import { eq } from "drizzle-orm";
 
 export async function POST(req: NextRequest) {
   try {
@@ -79,11 +80,12 @@ export async function POST(req: NextRequest) {
         .returning();
 
       return NextResponse.json({
-        ...dbResult[0],status:'ready',
+        ...dbResult[0],
+        status: "ready",
       });
     }
 
-    return NextResponse.json(JSON.parse(response.text??'{}'));
+    return NextResponse.json(JSON.parse(response.text ?? "{}"));
   } catch (e: any) {
     console.error("Agent Configure API Error:", e);
     const status = e.status || 500;
@@ -95,6 +97,51 @@ export async function POST(req: NextRequest) {
             : e.message || "Failed to generate configuration",
       },
       { status }
+    );
+  }
+}
+
+export async function PUT(req: NextRequest) {
+  try {
+    const body = await req.json();
+    
+    // Normalize payload whether sent as { agentConfig: ... }, { data: ... }, or raw object
+    const agentData =
+      body.agentConfig || body.AgentConfig || body.data?.draftAgent || body.draftAgent || body;
+
+    // Explicitly exclude non-updatable and timestamp string fields
+    const {
+      agentId,
+      id,
+      createdAt,
+      updatedAt,
+      userEmail,
+      ...updateFields
+    } = agentData;
+
+    if (!agentId) {
+      return NextResponse.json(
+        { error: "agentId is required to update agent" },
+        { status: 400 }
+      );
+    }
+
+    const result = await db
+      .update(AgentConfig)
+      .set({
+        ...updateFields,
+      })
+      .where(eq(AgentConfig.agentId, agentId))
+      .returning();
+
+    console.log("Updated agent successfully:", result[0]);
+
+    return NextResponse.json(result[0]);
+  } catch (error: any) {
+    console.error("Agent Update Error:", error);
+    return NextResponse.json(
+      { error: error.message || "Failed to update agent" },
+      { status: 500 }
     );
   }
 }
