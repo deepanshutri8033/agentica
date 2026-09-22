@@ -26,7 +26,8 @@ export async function GET(req: NextRequest) {
     const agentRecords = await db
       .select()
       .from(AgentConfig)
-      .where(eq(AgentConfig.agentId, agentId));
+      .where(eq(AgentConfig.agentId, agentId))
+      .limit(1);
 
     if (!agentRecords || agentRecords.length === 0) {
       return NextResponse.json({ error: "Agent not found" }, { status: 404 });
@@ -52,14 +53,20 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    // 3. Extract toolkits list
+    // 3. Extract toolkits safely across SDK variations
     let toolkits: any[] = [];
+
     if (typeof session.toolkits === "function") {
       const res = await session.toolkits();
-      toolkits = Array.isArray(res) ? res : res?.items || [];
+      toolkits = Array.isArray(res) ? res : res?.items || res?.data || [];
+    } else if (typeof session.getToolkits === "function") {
+      const res = await session.getToolkits();
+      toolkits = Array.isArray(res) ? res : res?.items || res?.data || [];
+    } else if (Array.isArray(session.toolkits)) {
+      toolkits = session.toolkits;
     }
 
-    return NextResponse.json({ toolkits });
+    return NextResponse.json({ success: true, toolkits }, { status: 200 });
   } catch (error: any) {
     console.error("Failed to fetch agent tools:", error);
     return NextResponse.json(
