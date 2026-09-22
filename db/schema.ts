@@ -87,6 +87,7 @@ export const AgentConfig = pgTable("agentConfig", {
   }>(),
   status: varchar("status", { length: 50 }).default("active"), // active, pause
   outputFormat: text("outputFormat"),
+  composioSessionId:varchar('composio'),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 

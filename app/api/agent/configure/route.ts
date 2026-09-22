@@ -3,9 +3,9 @@ import { GoogleGenAI } from "@google/genai";
 import { AgentConfigSystemPrompt } from "@/data/Prompt";
 import { AgentConfigRespSchema } from "@/data/responseSchema";
 import { currentUser } from "@clerk/nextjs/server";
-import { db } from "@/db"; // Adjust this path if your db instance lives in @/configs/db or @/db/index
+import { db } from "@/db";
 import { AgentConfig } from "@/db/schema";
-import { eq } from "drizzle-orm";
+import { eq, desc } from "drizzle-orm";
 
 export async function POST(req: NextRequest) {
   try {
@@ -33,11 +33,12 @@ export async function POST(req: NextRequest) {
       prompt
     );
 
-    let response = null;
+    let response: any = null;
     let lastError: any = null;
+    const maxAttempts = 3;
 
-    // Retry specifically for temporary 503 server busy spikes
-    for (let attempt = 0; attempt < 3; attempt++) {
+    // Retry with exponential delay for temporary 503 load spikes
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
         response = await ai.models.generateContent({
           model: "gemini-3.6-flash",
@@ -50,11 +51,19 @@ export async function POST(req: NextRequest) {
         if (response) break;
       } catch (err: any) {
         lastError = err;
-        if (err.status === 503 && attempt < 2) {
-          await new Promise((resolve) => setTimeout(resolve, 2000));
-          continue;
+        const isServerBusy = err?.status === 503 || err?.code === 503;
+        console.warn(
+          `Gemini attempt ${attempt} failed (Status: ${err?.status || err?.code}):`,
+          err?.message || err
+        );
+
+        if (attempt === maxAttempts) {
+          throw err;
         }
-        throw err;
+
+        // Wait 2s on 1st retry, 4s on 2nd retry to clear demand spikes
+        const delay = isServerBusy ? attempt * 2000 : 1500;
+        await new Promise((resolve) => setTimeout(resolve, delay));
       }
     }
 
@@ -88,7 +97,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(JSON.parse(response.text ?? "{}"));
   } catch (e: any) {
     console.error("Agent Configure API Error:", e);
-    const status = e.status || 500;
+    const status = e.status || e.code || 500;
     return NextResponse.json(
       {
         error:
@@ -96,7 +105,7 @@ export async function POST(req: NextRequest) {
             ? "Gemini servers are currently experiencing high demand. Please try again in a few seconds."
             : e.message || "Failed to generate configuration",
       },
-      { status }
+      { status: typeof status === "number" && status >= 400 && status < 600 ? status : 500 }
     );
   }
 }
@@ -104,12 +113,27 @@ export async function POST(req: NextRequest) {
 export async function PUT(req: NextRequest) {
   try {
     const body = await req.json();
-    
-    // Normalize payload whether sent as { agentConfig: ... }, { data: ... }, or raw object
-    const agentData =
-      body.agentConfig || body.AgentConfig || body.data?.draftAgent || body.draftAgent || body;
 
-    // Explicitly exclude non-updatable and timestamp string fields
+    // 1. Normalize payload whether sent as { agentConfig: ... }, { data: ... }, or flat
+    const agentData =
+      body.agentConfig ||
+      body.AgentConfig ||
+      body.data?.draftAgent ||
+      body.draftAgent ||
+      body;
+
+    // 2. Accept either agentId or fallback to id
+    const targetAgentId = agentData.agentId || agentData.id;
+
+    if (!targetAgentId) {
+      console.error("PUT request missing agent ID. Received body:", body);
+      return NextResponse.json(
+        { error: "agentId is required to update agent" },
+        { status: 400 }
+      );
+    }
+
+    // 3. Strip non-updatable and primary key fields
     const {
       agentId,
       id,
@@ -119,28 +143,56 @@ export async function PUT(req: NextRequest) {
       ...updateFields
     } = agentData;
 
-    if (!agentId) {
-      return NextResponse.json(
-        { error: "agentId is required to update agent" },
-        { status: 400 }
-      );
-    }
-
+    // 4. Update row in database
     const result = await db
       .update(AgentConfig)
       .set({
         ...updateFields,
       })
-      .where(eq(AgentConfig.agentId, agentId))
+      .where(eq(AgentConfig.agentId, String(targetAgentId)))
       .returning();
 
-    console.log("Updated agent successfully:", result[0]);
+    if (!result || result.length === 0) {
+      return NextResponse.json(
+        { error: "Agent not found in database" },
+        { status: 404 }
+      );
+    }
 
+    console.log("Updated agent successfully in DB:", result[0]);
     return NextResponse.json(result[0]);
   } catch (error: any) {
     console.error("Agent Update Error:", error);
     return NextResponse.json(
       { error: error.message || "Failed to update agent" },
+      { status: 500 }
+    );
+  }
+}
+
+export async function GET(req: NextRequest) {
+  try {
+    const user = await currentUser();
+    const userEmail = user?.primaryEmailAddress?.emailAddress;
+
+    if (!user || !userEmail) {
+      return NextResponse.json(
+        { error: "Unauthorized User" },
+        { status: 401 }
+      );
+    }
+
+    const result = await db
+      .select()
+      .from(AgentConfig)
+      .where(eq(AgentConfig.userEmail, userEmail))
+      .orderBy(desc(AgentConfig.createdAt));
+
+    return NextResponse.json(result);
+  } catch (error: any) {
+    console.error("Agent Fetch Error:", error);
+    return NextResponse.json(
+      { error: error.message || "Failed to fetch agents" },
       { status: 500 }
     );
   }

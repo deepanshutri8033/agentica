@@ -1,6 +1,7 @@
 import * as React from 'react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import CreateAgent from '@/components/custom/agents/createAgent';
+import MyAgents from '@/components/custom/agents/MyAgents';
 
 
 function AgentsPage(){
@@ -13,7 +14,7 @@ function AgentsPage(){
                 <TabsTrigger value="my-agent">My Agents</TabsTrigger>
             </TabsList>
             <TabsContent value="create-agent"><CreateAgent/></TabsContent>
-            <TabsContent value="my-agent">My Agents</TabsContent>
+            <TabsContent value="my-agent"><MyAgents/></TabsContent>
             </Tabs>
             </div>
 
