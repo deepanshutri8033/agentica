@@ -57,3 +57,69 @@
                               │
                               ▼
                      [ Structured Output ]
+
+🚀 Quick Start
+Prerequisites
+Node.js: v18+
+
+Package Manager: npm or pnpm
+
+PostgreSQL Database
+
+1. Clone & Install
+Bash
+git clone [https://github.com/your-username/agentica.git](https://github.com/your-username/agentica.git)
+cd agentica
+npm install
+2. Environment Variables
+Create a .env.local file in the root directory:
+
+Code snippet
+# Database
+DATABASE_URL="postgresql://user:password@localhost:5432/agentica"
+
+# AI & Tools
+OPENAI_API_KEY="your_openai_api_key"
+COMPOSIO_API_KEY="your_composio_api_key"
+BROWSERBASE_API_KEY="your_browserbase_api_key"
+BROWSERBASE_PROJECT_ID="your_browserbase_project_id"
+
+# Inngest Workflow
+INNGEST_EVENT_KEY="your_inngest_event_key"
+INNGEST_SIGNING_KEY="your_inngest_signing_key"
+3. Run Database Migrations
+Bash
+# Push schema directly (Development)
+npm run db:push
+
+# Generate and apply migrations (Production)
+npm run db:generate
+npm run db:migrate
+4. Start Development Server
+Run the Next.js development server along with the Inngest CLI:
+
+Bash
+# Terminal 1: Web App
+npm run dev
+
+# Terminal 2: Inngest Dev Server
+npx inngest-cli@latest dev
+Open http://localhost:3000 to view the application.
+
+📜 Available Scripts
+In the project directory, you can run:
+
+npm run dev — Launches the Next.js development server.
+
+npm run build — Builds the application for production.
+
+npm run db:push — Syncs Drizzle schema directly with the database.
+
+npm run db:studio — Opens Drizzle Studio to view database tables visually.
+
+👤 Author
+Deepanshu Tripathi
+
+GitHub: @your-github
+
+LinkedIn: Deepanshu Tripathi
