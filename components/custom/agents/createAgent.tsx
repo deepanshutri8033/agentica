@@ -100,6 +100,7 @@ export type AgentSchedule = {
   date?: string;
   timezone?: string;
   daysOfWeek?: string[];
+  dayOfMonth?: number;
 };
 
 export type CreatedAgentType = {

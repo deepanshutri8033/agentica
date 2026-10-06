@@ -1,13 +1,22 @@
 import { inngest } from "./client";
 import { db } from "@/db";
 import { agentRuns, AgentConfig } from "@/db/schema";
-import { eq, and, lte, asc } from "drizzle-orm";
+import { eq, and, lte, lt, asc, inArray, or } from "drizzle-orm";
 import {
   calculateNextOccurrence,
   getNextScheduledOccurrence,
 } from "./schedule-utils";
 import { executeAgent } from "@/lib/execute-agent";
 import { isGeminiQuotaError } from "@/lib/build-agent";
+
+function isRetryableAgentExecutionError(error: any) {
+  const status = error?.status ?? error?.statusCode ?? error?.error?.code;
+  const code = error?.code ?? error?.cause?.code;
+  return (
+    [408, 429, 500, 502, 503, 504].includes(Number(status)) ||
+    ["ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EAI_AGAIN"].includes(code)
+  );
+}
 
 // =========================================================================
 // FUNCTION 1: Dispatch Upcoming Agent Runs (Cron Job)
@@ -24,14 +33,21 @@ export const dispatchUpcomingRuns = (inngest as any).createFunction(
     // Step 2: Find Upcoming Runs in PostgreSQL
     const upcomingRuns = await step.run("claim-due-runs", async () => {
       const targetTime = new Date();
+      const staleQueueCutoff = new Date(targetTime.getTime() - 5 * 60_000);
 
       const runs = await db
         .select()
         .from(agentRuns)
         .where(
           and(
-            eq(agentRuns.status, "scheduled"),
-            lte(agentRuns.scheduledFor, targetTime)
+            lte(agentRuns.scheduledFor, targetTime),
+            or(
+              eq(agentRuns.status, "scheduled"),
+              and(
+                eq(agentRuns.status, "queued"),
+                lt(agentRuns.queuedAt, staleQueueCutoff)
+              )
+            )
           )
         )
         .orderBy(asc(agentRuns.scheduledFor))
@@ -40,6 +56,13 @@ export const dispatchUpcomingRuns = (inngest as any).createFunction(
       const claimed = [];
       for (const run of runs) {
         const now = new Date();
+        const statusGuard =
+          run.status === "scheduled"
+            ? eq(agentRuns.status, "scheduled")
+            : and(
+                eq(agentRuns.status, "queued"),
+                lt(agentRuns.queuedAt, staleQueueCutoff)
+              );
         const [claimedRun] = await db
           .update(agentRuns)
           .set({
@@ -48,7 +71,7 @@ export const dispatchUpcomingRuns = (inngest as any).createFunction(
             inngestEventId: `agent-run-${run.id}`,
             updatedAt: now,
           })
-          .where(and(eq(agentRuns.id, run.id), eq(agentRuns.status, "scheduled")))
+          .where(and(eq(agentRuns.id, run.id), statusGuard))
           .returning();
 
         if (claimedRun) {
@@ -127,6 +150,38 @@ export const executeScheduledAgentRun = (inngest as any).createFunction(
     name: "Groovi AI — Execute Scheduled Agent Run Worker",
     retries: 3,
     triggers: [{ event: "agent/run.scheduled" }],
+    onFailure: async ({
+      event,
+      error,
+      step,
+    }: {
+      event: any;
+      error: Error;
+      step: any;
+    }) => {
+      const runId = event?.data?.event?.data?.runId;
+      if (typeof runId !== "number") {
+        console.error("Could not mark exhausted scheduled run failed: missing runId.");
+        return;
+      }
+
+      await step.run("mark-run-failed-after-retries", async () => {
+        await db
+          .update(agentRuns)
+          .set({
+            status: "failed",
+            error: error.message || "Agent execution failed after retries.",
+            completedAt: new Date(),
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(agentRuns.id, runId),
+              inArray(agentRuns.status, ["queued", "running"])
+            )
+          );
+      });
+    },
   },
   async ({ event, step }: { event: any; step: any }) => {
     const { runId, agentId, userEmail, input, scheduledFor } = event.data;
@@ -230,8 +285,7 @@ export const executeScheduledAgentRun = (inngest as any).createFunction(
       }
     });
 
-    // Step 8: Final execution of Current Agent Run
-    const runResult = await step.run("execute-agent-task", async () => {
+    const claimedRun = await step.run("claim-agent-run", async () => {
       const [claimedRun] = await db
         .update(agentRuns)
         .set({
@@ -248,9 +302,22 @@ export const executeScheduledAgentRun = (inngest as any).createFunction(
         .returning({ id: agentRuns.id });
 
       if (!claimedRun) {
-        return { success: false, skipped: true, reason: "Run is no longer queued." };
+        return false;
       }
 
+      return true;
+    });
+
+    if (!claimedRun) {
+      return {
+        runId,
+        status: "skipped",
+        reason: "Run is no longer queued.",
+      };
+    }
+
+    // Keep execution in its own durable step so retries reuse the successful claim.
+    const runResult = await step.run("execute-agent-task", async () => {
       try {
         const effectiveUserEmail = userEmail || agentConfig.userEmail || "system@groovi-ai.com";
         const result = await executeAgent({
@@ -259,38 +326,43 @@ export const executeScheduledAgentRun = (inngest as any).createFunction(
           input: input || agentConfig.objective || agentConfig.instructions,
         });
 
-        const completedAt = new Date();
-        await db
-          .update(agentRuns)
-          .set({
-            status: "completed",
-            completedAt: completedAt,
-            result: result,
-            updatedAt: completedAt,
-          })
-          .where(eq(agentRuns.id, runId));
-
         return { success: true, result };
       } catch (err: any) {
         const errorMsg = err?.message || "Failed to execute agent run";
-        const failedAt = new Date();
-
-        await db
-          .update(agentRuns)
-          .set({
-            status: "failed",
-            error: errorMsg,
-            completedAt: failedAt,
-            updatedAt: failedAt,
-          })
-          .where(eq(agentRuns.id, runId));
-
-        if (isGeminiQuotaError(err)) {
+        if (isGeminiQuotaError(err) || !isRetryableAgentExecutionError(err)) {
           return { success: false, error: errorMsg, retryable: false };
         }
 
-        throw new Error(`Agent execution failed: ${errorMsg}`);
+        throw err instanceof Error ? err : new Error(errorMsg);
       }
+    });
+
+    await step.run("persist-agent-outcome", async () => {
+      const finishedAt = new Date();
+      await db
+        .update(agentRuns)
+        .set(
+          runResult.success
+            ? {
+                status: "completed",
+                completedAt: finishedAt,
+                result: runResult.result,
+                error: null,
+                updatedAt: finishedAt,
+              }
+            : {
+                status: "failed",
+                completedAt: finishedAt,
+                error: runResult.error,
+                updatedAt: finishedAt,
+              }
+        )
+        .where(
+          and(
+            eq(agentRuns.id, runId),
+            inArray(agentRuns.status, ["queued", "running"])
+          )
+        );
     });
 
     return {

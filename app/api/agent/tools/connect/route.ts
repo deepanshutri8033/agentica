@@ -26,7 +26,7 @@ export async function POST(req: NextRequest) {
     const body = await req.json();
     let { toolSlug, agentId, appName, tool } = body;
 
-    // 1. Defensively extract toolSlug if passed as an object or under alternative keys
+    // Defensively extract toolSlug if passed as an object or under alternative keys.
     let rawSlug = toolSlug || appName || tool;
     if (typeof rawSlug === "object" && rawSlug !== null) {
       rawSlug = rawSlug.slug || rawSlug.toolSlug || rawSlug.name || rawSlug.appName || "";
@@ -34,7 +34,7 @@ export async function POST(req: NextRequest) {
 
     if (typeof rawSlug !== "string" || !rawSlug.trim()) {
       return NextResponse.json(
-        { error: "Valid toolSlug string and agentId are required" },
+        { error: "A valid toolSlug string is required" },
         { status: 400 }
       );
     }

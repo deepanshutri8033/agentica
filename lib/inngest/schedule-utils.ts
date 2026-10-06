@@ -5,6 +5,8 @@ type AgentSchedule = {
   time?: string;
   date?: string;
   timezone?: string;
+  daysOfWeek?: string[];
+  dayOfMonth?: number;
 };
 
 type LocalDateParts = {
@@ -103,7 +105,8 @@ function addCalendarDays(
 function addCalendarMonths(
   parts: LocalDateParts,
   months: number,
-  time: { hour: number; minute: number }
+  time: { hour: number; minute: number },
+  dayOfMonth = parts.day
 ): LocalDateParts {
   const firstOfMonth = new Date(
     Date.UTC(parts.year, parts.month - 1 + months, 1)
@@ -119,9 +122,60 @@ function addCalendarMonths(
   return {
     year: firstOfMonth.getUTCFullYear(),
     month: firstOfMonth.getUTCMonth() + 1,
-    day: Math.min(parts.day, lastDay),
+    day: Math.min(dayOfMonth, lastDay),
     hour: time.hour,
     minute: time.minute,
+  };
+}
+
+const WEEKDAY_INDEX: Record<string, number> = {
+  sun: 0,
+  sunday: 0,
+  mon: 1,
+  monday: 1,
+  tue: 2,
+  tues: 2,
+  tuesday: 2,
+  wed: 3,
+  wednesday: 3,
+  thu: 4,
+  thur: 4,
+  thurs: 4,
+  thursday: 4,
+  fri: 5,
+  friday: 5,
+  sat: 6,
+  saturday: 6,
+};
+
+function getSelectedWeekdays(daysOfWeek?: string[]): number[] {
+  return (daysOfWeek || [])
+    .map((day) => WEEKDAY_INDEX[day.trim().toLowerCase()])
+    .filter((day): day is number => day !== undefined);
+}
+
+function getWeekday(parts: LocalDateParts): number {
+  return new Date(Date.UTC(parts.year, parts.month - 1, parts.day)).getUTCDay();
+}
+
+export function withMonthlyDayAnchor(
+  schedule: AgentSchedule,
+  referenceDate: Date = new Date()
+): AgentSchedule {
+  if (
+    schedule.type?.toLowerCase() !== "recurring" ||
+    !["monthly", "every_month"].includes((schedule.frequency || "").toLowerCase()) ||
+    (Number.isInteger(schedule.dayOfMonth) &&
+      schedule.dayOfMonth! >= 1 &&
+      schedule.dayOfMonth! <= 31)
+  ) {
+    return schedule;
+  }
+
+  const timeZone = schedule.timezone || "UTC";
+  return {
+    ...schedule,
+    dayOfMonth: getLocalParts(referenceDate, timeZone).day,
   };
 }
 
@@ -189,7 +243,17 @@ export function getNextScheduledOccurrence(
     throw new Error(`Unsupported schedule type: ${recurrenceType}`);
   }
 
-  if (schedule.intervalMinutes && schedule.intervalMinutes > 0) {
+  const isInterval =
+    ["interval", "every_interval"].includes(frequency) ||
+    (!frequency && schedule.intervalMinutes !== undefined);
+  if (isInterval) {
+    if (
+      !Number.isFinite(schedule.intervalMinutes) ||
+      !schedule.intervalMinutes ||
+      schedule.intervalMinutes <= 0
+    ) {
+      throw new Error("Interval schedules require a positive intervalMinutes value.");
+    }
     return new Date(after.getTime() + schedule.intervalMinutes * 60_000);
   }
 
@@ -208,21 +272,51 @@ export function getNextScheduledOccurrence(
   }
 
   const isMonthly = ["monthly", "every_month"].includes(frequency);
-  let candidate = localDateTimeToUtc(
-    isMonthly
-      ? addCalendarMonths(nowParts, 1, configuredTime)
-      : addCalendarDays(nowParts, days, configuredTime),
-    timeZone
-  );
-  if (candidate <= after) {
-    candidate = localDateTimeToUtc(
-      isMonthly
-        ? addCalendarMonths(nowParts, 2, configuredTime)
-        : addCalendarDays(nowParts, days === 0 ? 1 : days, configuredTime),
+  if (isMonthly) {
+    const dayOfMonth =
+      Number.isInteger(schedule.dayOfMonth) &&
+      schedule.dayOfMonth! >= 1 &&
+      schedule.dayOfMonth! <= 31
+        ? schedule.dayOfMonth!
+        : nowParts.day;
+    const thisMonth = localDateTimeToUtc(
+      addCalendarMonths(nowParts, 0, configuredTime, dayOfMonth),
       timeZone
     );
+    return thisMonth > after
+      ? thisMonth
+      : localDateTimeToUtc(
+          addCalendarMonths(nowParts, 1, configuredTime, dayOfMonth),
+          timeZone
+        );
   }
-  return candidate;
+
+  if (days === 7) {
+    const selectedDays = getSelectedWeekdays(schedule.daysOfWeek);
+    if (schedule.daysOfWeek?.length && selectedDays.length === 0) {
+      throw new Error("Weekly schedule has no valid daysOfWeek values.");
+    }
+    const weekdays = selectedDays.length
+      ? selectedDays
+      : [getWeekday(nowParts)];
+
+    for (let offset = 0; offset <= 7; offset += 1) {
+      const candidateParts = addCalendarDays(nowParts, offset, configuredTime);
+      const candidate = localDateTimeToUtc(candidateParts, timeZone);
+      if (weekdays.includes(getWeekday(candidateParts)) && candidate > after) {
+        return candidate;
+      }
+    }
+    throw new Error("Unable to calculate the next weekly schedule occurrence.");
+  }
+
+  const today = localDateTimeToUtc(
+    { ...nowParts, ...configuredTime },
+    timeZone
+  );
+  return today > after
+    ? today
+    : localDateTimeToUtc(addCalendarDays(nowParts, 1, configuredTime), timeZone);
 }
 
 /**
@@ -235,7 +329,17 @@ export function calculateNextOccurrence(
   if (!schedule || schedule.type?.toLowerCase() !== "recurring") return null;
 
   const frequency = (schedule.frequency || "").toLowerCase();
-  if (schedule.intervalMinutes && schedule.intervalMinutes > 0) {
+  const isInterval =
+    ["interval", "every_interval"].includes(frequency) ||
+    (!frequency && schedule.intervalMinutes !== undefined);
+  if (isInterval) {
+    if (
+      !Number.isFinite(schedule.intervalMinutes) ||
+      !schedule.intervalMinutes ||
+      schedule.intervalMinutes <= 0
+    ) {
+      throw new Error("Interval schedules require a positive intervalMinutes value.");
+    }
     return new Date(
       currentScheduledFor.getTime() + schedule.intervalMinutes * 60_000
     );
@@ -264,10 +368,37 @@ export function calculateNextOccurrence(
 
   try {
     const parts = getLocalParts(currentScheduledFor, timeZone);
-    const nextParts = isMonthly
-      ? addCalendarMonths(parts, 1, time)
-      : addCalendarDays(parts, days, time);
-    return localDateTimeToUtc(nextParts, timeZone);
+    if (isMonthly) {
+      const dayOfMonth =
+        Number.isInteger(schedule.dayOfMonth) &&
+        schedule.dayOfMonth! >= 1 &&
+        schedule.dayOfMonth! <= 31
+          ? schedule.dayOfMonth!
+          : parts.day;
+      return localDateTimeToUtc(
+        addCalendarMonths(parts, 1, time, dayOfMonth),
+        timeZone
+      );
+    }
+
+    if (days === 7) {
+      const selectedDays = getSelectedWeekdays(schedule.daysOfWeek);
+      if (schedule.daysOfWeek?.length && selectedDays.length === 0) {
+        throw new Error("Weekly schedule has no valid daysOfWeek values.");
+      }
+      const weekdays = selectedDays.length
+        ? selectedDays
+        : [getWeekday(parts)];
+      for (let offset = 1; offset <= 7; offset += 1) {
+        const nextParts = addCalendarDays(parts, offset, time);
+        if (weekdays.includes(getWeekday(nextParts))) {
+          return localDateTimeToUtc(nextParts, timeZone);
+        }
+      }
+      throw new Error("Unable to calculate the next weekly schedule occurrence.");
+    }
+
+    return localDateTimeToUtc(addCalendarDays(parts, days, time), timeZone);
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("Invalid schedule")) {
       throw error;

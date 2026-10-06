@@ -4,7 +4,10 @@ import { auth, currentUser } from "@clerk/nextjs/server";
 import { db } from "@/db";
 import { AgentConfig, agentRuns } from "@/db/schema";
 import { and, desc, eq, inArray } from "drizzle-orm";
-import { getNextScheduledOccurrence } from "@/lib/inngest/schedule-utils";
+import {
+  getNextScheduledOccurrence,
+  withMonthlyDayAnchor,
+} from "@/lib/inngest/schedule-utils";
 import { isGeminiQuotaError } from "@/lib/build-agent";
 
 export const runtime = "nodejs";
@@ -269,10 +272,10 @@ Do not wrap response in markdown blocks.`;
 
     const parsedConfig = JSON.parse(responseText);
     const generatedAgentId = `agent_${Math.random().toString(36).substring(2, 11)}`;
-    const schedule = {
+    const schedule = withMonthlyDayAnchor({
       ...(parsedConfig.schedule || { type: "recurring", frequency: "daily", time: "09:00" }),
       timezone: body.timezone || "UTC",
-    };
+    });
 
     const newAgentRecord = {
       userEmail,
@@ -386,6 +389,15 @@ export async function PUT(req: NextRequest) {
 
     const shouldReplan =
       Object.hasOwn(body, "schedule") || Object.hasOwn(body, "status");
+    if (
+      Object.hasOwn(body, "schedule") &&
+      updateFields.schedule &&
+      typeof updateFields.schedule === "object"
+    ) {
+      updateFields.schedule = withMonthlyDayAnchor(
+        updateFields.schedule as NonNullable<typeof existingAgent.schedule>
+      );
+    }
     const effectiveSchedule =
       (updateFields.schedule as typeof existingAgent.schedule | undefined) ||
       existingAgent.schedule;

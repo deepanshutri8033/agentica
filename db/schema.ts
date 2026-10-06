@@ -86,6 +86,9 @@ export const AgentConfig = pgTable("agentConfig", {
     intervalMinutes?: number;
     time?: string;
     cron?: string;
+    timezone?: string;
+    daysOfWeek?: string[];
+    dayOfMonth?: number;
   }>(),
   status: varchar("status", { length: 50 }).default("active"), // active, pause
   outputFormat: text("outputFormat"),
