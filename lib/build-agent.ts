@@ -77,11 +77,11 @@ export async function buildAgent(
   }
 
   let composioTools: any[] = [];
-  if (typeof session?.getTools === "function") {
-    composioTools = await session.getTools();
+  if (typeof session?.tools === "function") {
+    composioTools = await session.tools();
   } else if (expectsComposioTools) {
     throw new Error(
-      "This agent's Composio session does not expose its tools. Reconnect the integrations and try again."
+      "This agent's Composio session does not expose tools(). Verify the Composio SDK session and try again."
     );
   }
 
