@@ -70,8 +70,10 @@ export default function AgentChatSheet({ agent, open, onOpenChange }: Props) {
     try {
       const res = await axios.post("/api/agent/run", {
         agentId: agent.agentId,
-        agentConfig: agent,
         input: text,
+        history: messages
+          .filter((message) => !message.id.startsWith("greeting-"))
+          .map(({ role, content }) => ({ role, content })),
       });
 
       const replyContent =

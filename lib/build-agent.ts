@@ -62,16 +62,63 @@ export async function buildAgent(
     userEmail
   );
 
-  let composioTools: any[] = [];
-  try {
-    if (typeof session?.getTools === "function") {
-      composioTools = await session.getTools();
-    }
-  } catch (err: any) {
-    console.warn("Could not retrieve Composio tools:", err?.message);
+  const localOnlyToolkits = new Set([
+    "browserbase",
+    "browser_base",
+    "browser",
+  ]);
+  const expectsComposioTools = sanitizedTools.some(
+    (tool) => !localOnlyToolkits.has(tool)
+  );
+  if (expectsComposioTools && !session) {
+    throw new Error(
+      "This agent has Composio integrations configured, but its tool session could not be loaded. Check the Composio API key and reconnect the integrations."
+    );
   }
 
+  let composioTools: any[] = [];
+  if (typeof session?.getTools === "function") {
+    composioTools = await session.getTools();
+  } else if (expectsComposioTools) {
+    throw new Error(
+      "This agent's Composio session does not expose its tools. Reconnect the integrations and try again."
+    );
+  }
+
+  if (expectsComposioTools && composioTools.length === 0) {
+    throw new Error(
+      "No Composio tools were returned for this agent. Confirm its integrations are connected and enabled."
+    );
+  }
+
+  const taskContext = [
+    ["Agent name", agentConfig.name],
+    ["Description", agentConfig.description],
+    ["Saved objective", agentConfig.objective],
+    ["Saved instructions", agentConfig.instructions],
+    [
+      "Skills",
+      Array.isArray(agentConfig.skills) ? agentConfig.skills.join(", ") : "",
+    ],
+    ["Output format", agentConfig.outputFormat],
+    ["Configured integrations", sanitizedTools.join(", ")],
+  ]
+    .map(([label, value]) => {
+      const text = typeof value === "string" ? value.trim() : "";
+      return text ? `${label}: ${text}` : "";
+    })
+    .filter(Boolean)
+    .join("\n");
+
   const instructions = `
+You are a persistent assistant for the agent task described below. Keep this saved task context in mind for every chat turn. Answer follow-up questions in the context of that task, and carry out requests that advance it.
+
+<saved_agent_task>
+${taskContext || "No saved task details are available."}
+</saved_agent_task>
+
+When a user asks about information in a connected account, use the relevant available Composio tool to retrieve it. This includes Gmail messages and GitHub repositories, issues, pull requests, or activity when those tools are available. Do not claim access to an account or data unless the corresponding tool is available and its result confirms it. Be clear about the scope and freshness of retrieved information.
+
 Use only the available tools when needed.
 Do not claim that an action succeeded unless the tool result confirms it.
 Ask for confirmation before destructive or high-risk actions.
