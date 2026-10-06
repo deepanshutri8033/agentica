@@ -97,9 +97,26 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    if (error?.status === 503) {
+      return NextResponse.json(
+        {
+          error:
+            "Gemini is temporarily overloaded. Please wait a little and try again.",
+        },
+        { status: 503 }
+      );
+    }
+
     return NextResponse.json(
       { error: error?.message || "Internal server error" },
-      { status: error?.status === 429 ? 429 : 500 }
+      {
+        status:
+          typeof error?.status === "number" &&
+          error.status >= 400 &&
+          error.status < 600
+            ? error.status
+            : 500,
+      }
     );
   }
 }

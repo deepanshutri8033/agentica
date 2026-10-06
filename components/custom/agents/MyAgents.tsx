@@ -72,12 +72,20 @@ function MyAgents() {
   };
 
   const handleRunAgent = async (agent: CreatedAgentType) => {
+    const input = agent.objective?.trim() || agent.instructions?.trim();
+
+    if (!input) {
+      toast.error(`${agent.name} has no saved objective or instructions to run.`);
+      return;
+    }
+
     try {
       setRunningAgentId(agent.agentId);
       toast.info(`Triggering execution for ${agent.name}...`);
 
       const res = await axios.post("/api/agent/run", {
         agentId: agent.agentId,
+        input,
       });
 
       console.log("Agent run response:", res.data);
