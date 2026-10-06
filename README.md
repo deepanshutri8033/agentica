@@ -35,11 +35,28 @@ Agentica is a web application for creating AI agents, connecting them to externa
 - TypeScript and Tailwind CSS
 - Clerk authentication
 - PostgreSQL (Neon-compatible) and Drizzle ORM
-- Gemini or OpenAI for agent execution
+- Gemini or OpenAI as the model provider for agent execution
+- OpenAI Agents SDK as the agent orchestration framework
 - Gemini for agent configuration generation
 - Composio for connected service accounts and tools
 - Browserbase for optional browser automation
 - Inngest for scheduled background runs
+
+## AI models, the Agents SDK, and Composio
+
+The **OpenAI Agents SDK is the agent framework** used by this project. It manages agent execution and tool calls; using it does not by itself mean that requests are sent to OpenAI.
+
+When `AGENT_MODEL_PROVIDER=gemini`, `lib/build-agent.ts` configures the SDK to call Gemini's OpenAI-compatible API endpoint. In this mode, an OpenAI API key is not needed. When `AGENT_MODEL_PROVIDER=openai`, the project uses the OpenAI provider and requires `OPENAI_API_KEY`.
+
+Composio tools are adapted to the OpenAI Agents SDK through `@composio/openai-agents`. That adapter is a framework integration, separate from the selected model provider, so it can be used with Gemini through the compatible endpoint. A connected account and tools exposed by Composio are still required.
+
+### Dependency compatibility warning
+
+The currently declared dependency versions may produce an npm peer-dependency conflict: `@composio/openai-agents@0.10.1` declares a peer range of `@openai/agents@^0.1.3`, while this project declares `@openai/agents@^0.18.0`. A standard npm install may stop with `ERESOLVE`.
+
+Using `npm install --force` in Vercel can override npm's peer-dependency check and allow installation to continue, but it does **not** prove that the adapter is runtime-compatible. Treat this as a workaround, not a confirmed compatibility fix. The durable resolution is to use mutually compatible adapter and SDK versions, then install without `--force`, build, and test the integration.
+
+After deployment, verify the complete path with an agent that uses a connected Composio tool (for example, ask it to read a small, non-sensitive item from a connected service). Check both the agent response and the saved run result in Agentica. Inngest's successful workflow status alone does not verify that a tool call succeeded. Also ensure the selected model provider has available API quota.
 
 ## Requirements
 
