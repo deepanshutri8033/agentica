@@ -39,13 +39,6 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    if (!agentId) {
-      return NextResponse.json(
-        { error: "agentId is required" },
-        { status: 400 }
-      );
-    }
-
     const cleanSlug = rawSlug.toLowerCase().trim();
 
     if (NON_OAUTH_TOOLS.has(cleanSlug)) {

@@ -155,7 +155,12 @@ function CreateAgent({ initialPrompt = "" }: { initialPrompt?: string }) {
       }
     } catch (error) {
       console.error("Configuration request failed:", error);
-      toast.error("Couldn't create your agent. Please try again.");
+      const message =
+        axios.isAxiosError<{ error?: string }>(error) &&
+        typeof error.response?.data?.error === "string"
+          ? error.response.data.error
+          : "Couldn't create your agent. Please try again.";
+      toast.error(message);
     } finally {
       setLoading(false);
     }
@@ -184,7 +189,12 @@ function CreateAgent({ initialPrompt = "" }: { initialPrompt?: string }) {
       }
     } catch (error) {
       console.error("Finalization request failed:", error);
-      toast.error("Couldn't finish setting up your agent. Please try again.");
+      const message =
+        axios.isAxiosError<{ error?: string }>(error) &&
+        typeof error.response?.data?.error === "string"
+          ? error.response.data.error
+          : "Couldn't finish setting up your agent. Please try again.";
+      toast.error(message);
     } finally {
       setLoading(false);
     }

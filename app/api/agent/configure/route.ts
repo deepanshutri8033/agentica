@@ -5,6 +5,7 @@ import { db } from "@/db";
 import { AgentConfig, agentRuns } from "@/db/schema";
 import { and, desc, eq, inArray } from "drizzle-orm";
 import { getNextScheduledOccurrence } from "@/lib/inngest/schedule-utils";
+import { isGeminiQuotaError } from "@/lib/build-agent";
 
 export const runtime = "nodejs";
 
@@ -13,6 +14,29 @@ const GEMINI_MODELS = [
   "gemini-3.5-flash",
   "gemini-flash-latest",
 ];
+
+function getGeminiConfigurationError(error: any) {
+  if (isGeminiQuotaError(error)) {
+    return {
+      error:
+        "Gemini API quota is exhausted for this project. Wait for the quota to reset, enable billing, or configure a Gemini project with available quota.",
+      status: 429,
+    };
+  }
+
+  const status = error?.status ?? error?.statusCode;
+  if (status === 503 || status === 504) {
+    return {
+      error: "Gemini is temporarily unavailable. Please try again shortly.",
+      status: 503,
+    };
+  }
+
+  return {
+    error: error?.message || "Failed to generate agent configuration.",
+    status: typeof status === "number" && status >= 400 && status < 600 ? status : 500,
+  };
+}
 
 // GET: Fetch all agents owned by the logged-in user
 export async function GET(req: NextRequest) {
@@ -117,7 +141,16 @@ Do not wrap in markdown syntax.`;
           }
         } catch (err: any) {
           lastError = err;
+          if (isGeminiQuotaError(err)) break;
         }
+      }
+
+      if (!responseText && lastError) {
+        const failure = getGeminiConfigurationError(lastError);
+        return NextResponse.json(
+          { error: failure.error },
+          { status: failure.status }
+        );
       }
 
       if (responseText) {
@@ -215,13 +248,15 @@ Do not wrap response in markdown blocks.`;
         }
       } catch (err: any) {
         lastError = err;
+        if (isGeminiQuotaError(err)) break;
       }
     }
 
     if (!responseText) {
+      const failure = getGeminiConfigurationError(lastError);
       return NextResponse.json(
-        { error: lastError?.message || "Failed to finalize agent configuration." },
-        { status: 500 }
+        { error: failure.error },
+        { status: failure.status }
       );
     }
 
@@ -283,9 +318,10 @@ Do not wrap response in markdown blocks.`;
     );
   } catch (err: any) {
     console.error("Gemini Agent Configure API Error:", err);
+    const failure = getGeminiConfigurationError(err);
     return NextResponse.json(
-      { error: err?.message || "Internal Server Error" },
-      { status: 500 }
+      { error: failure.error },
+      { status: failure.status }
     );
   }
 }
