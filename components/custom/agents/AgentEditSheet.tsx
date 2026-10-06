@@ -2,7 +2,7 @@
 
 import axios from "axios";
 import * as React from "react";
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -25,8 +25,9 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
-import { RefreshCw, Clock, X, Plus, Wrench, Loader2, KeyRound } from "lucide-react";
+import { RefreshCw, Clock, X, Plus, Wrench, Loader2, KeyRound, Bot } from "lucide-react";
 import type { CreatedAgentType, AgentSchedule } from "./createAgent";
+import { normalizeToolkitSlug } from "@/lib/normalize-toolkit-slug";
 
 export type EditableTool = {
   slug: string;
@@ -58,7 +59,7 @@ const NON_OAUTH_TOOLS = new Set([
   "serp_search",
 ]);
 
-function AgentEditSheet({
+export function AgentEditSheet({
   agentConfig,
   setUpdatedAgent,
   openSheet_ = false,
@@ -69,11 +70,19 @@ function AgentEditSheet({
   const [skillInput, setSkillInput] = useState("");
   const [tools, setTools] = useState<EditableTool[]>([]);
   const [activeActionSlug, setActiveActionSlug] = useState<string | null>(null);
-  const [openSheet, setOpenSheet] = useState(openSheet_);
-  const scrollRef = useRef<HTMLDivElement>(null);
+  const [headerImageError, setHeaderImageError] = useState(false);
 
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const popupTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Sync draft agent when agentConfig changes
   useEffect(() => {
-    setOpenSheet(openSheet_);
+    setDraftAgent(agentConfig);
+    setHeaderImageError(false);
+  }, [agentConfig]);
+
+  // Scroll to top when opening sheet
+  useEffect(() => {
     if (openSheet_) {
       setTimeout(() => {
         if (scrollRef.current) {
@@ -83,34 +92,45 @@ function AgentEditSheet({
     }
   }, [openSheet_]);
 
-  const GetTools = async () => {
-    if (!agentConfig?.agentId) return;
+  // Clean up popup monitoring timer on unmount
+  useEffect(() => {
+    return () => {
+      if (popupTimerRef.current) {
+        clearInterval(popupTimerRef.current);
+      }
+    };
+  }, []);
+
+  const GetTools = useCallback(async (): Promise<EditableTool[] | null> => {
+    if (!agentConfig?.agentId) return null;
     try {
       const result = await axios.get(
-        "/api/agent/tools?agentId=" + agentConfig.agentId
+        `/api/agent/tools?agentId=${agentConfig.agentId}`
       );
-      // Handles both direct array responses and { toolkits: [...] } wrapped payloads
       const data = result.data;
       const parsedTools = Array.isArray(data)
         ? data
         : Array.isArray(data?.toolkits)
-        ? data.toolkits
-        : [];
+          ? data.toolkits
+          : Array.isArray(data?.tools)
+            ? data.tools
+            : [];
       setTools(parsedTools);
+      return parsedTools;
     } catch (error) {
       console.error("Failed to load tools:", error);
-      setTools([]);
+      toast.error("Couldn't refresh this agent's connection status.");
+      return null;
     }
-  };
+  }, [agentConfig?.agentId]);
 
   useEffect(() => {
-    setDraftAgent(agentConfig);
-    if (agentConfig?.agentId) {
+    if (agentConfig?.agentId && openSheet_) {
       GetTools();
     }
-  }, [agentConfig]);
+  }, [agentConfig?.agentId, openSheet_, GetTools]);
 
-  const updateDraft = (key: string, value: any) => {
+  const updateDraft = (key: keyof CreatedAgentType, value: any) => {
     setDraftAgent((prev: any) => ({
       ...prev,
       [key]: value,
@@ -163,39 +183,67 @@ function AgentEditSheet({
       return;
     }
 
+    let popup: Window | null = null;
+
     try {
       setActiveActionSlug(cleanSlug);
       toast.info(`Initiating connection for ${tool.name || cleanSlug}...`);
+
+      popup = window.open(
+        "about:blank",
+        "ComposioAuthPopup",
+        "width=600,height=750"
+      );
+      if (!popup) {
+        toast.error("Allow popups for this site to connect an integration.");
+        setActiveActionSlug(null);
+        return;
+      }
 
       const res = await axios.post("/api/agent/tools/connect", {
         toolSlug: cleanSlug,
         agentId: targetAgentId,
       });
 
-      if (res.data?.redirectUrl) {
-        const popup = window.open(
-          res.data.redirectUrl,
-          "ComposioAuthPopup",
-          "width=600,height=750"
-        );
-
-        const timer = setInterval(() => {
-          if (!popup || popup.closed) {
-            clearInterval(timer);
-            setTimeout(() => {
-              GetTools();
-              toast.success(`Refreshed ${tool.name || cleanSlug} connection!`);
-            }, 600);
-          }
-        }, 1200);
-      } else {
-        toast.error("No authorization URL returned.");
+      if (!res.data?.redirectUrl) {
+        popup.close();
+        popup = null;
+        throw new Error("No authorization URL was returned.");
       }
+      popup.location.href = res.data.redirectUrl;
+
+      if (popupTimerRef.current) clearInterval(popupTimerRef.current);
+      popupTimerRef.current = setInterval(() => {
+        if (!popup || !popup.closed) return;
+
+        if (popupTimerRef.current) clearInterval(popupTimerRef.current);
+        popupTimerRef.current = null;
+        setActiveActionSlug(null);
+
+        void (async () => {
+          for (let attempt = 0; attempt < 5; attempt += 1) {
+            await new Promise((resolve) => setTimeout(resolve, 1500));
+            const updatedTools = await GetTools();
+            const connected = updatedTools?.some(
+              (item) =>
+                normalizeToolkitSlug(item.slug) === normalizeToolkitSlug(cleanSlug) &&
+                (item.connected || item.connection?.status === "ACTIVE")
+            );
+            if (connected) {
+              toast.success(`${tool.name || cleanSlug} connected successfully.`);
+              return;
+            }
+          }
+          toast.info(`We couldn't confirm ${tool.name || cleanSlug} yet. Refresh the status to check.`);
+        })();
+      }, 1000);
     } catch (err: any) {
+      popup?.close();
       console.error("Connection failed:", err);
-      toast.error(err.response?.data?.error || "Failed to initiate tool connection");
-    } finally {
+      toast.error(err.response?.data?.error || "Couldn't connect this integration. Please try again.");
       setActiveActionSlug(null);
+    } finally {
+      if (!popupTimerRef.current) setActiveActionSlug(null);
     }
   };
 
@@ -269,9 +317,8 @@ function AgentEditSheet({
 
   return (
     <Sheet
-      open={openSheet}
+      open={openSheet_}
       onOpenChange={(isOpen) => {
-        setOpenSheet(isOpen);
         if (!isOpen) closeSheet();
       }}
     >
@@ -279,17 +326,19 @@ function AgentEditSheet({
         <SheetHeader className="border-b px-6 py-4 shrink-0">
           <div className="flex items-center gap-3">
             <div className="h-10 w-10 relative flex items-center justify-center rounded-xl bg-muted/40 border shrink-0 overflow-hidden">
-              <img
-                key={draftAgent?.agentImage}
-                alt="logo"
-                src={draftAgent?.agentImage || "/logo.svg"}
-                width={28}
-                height={28}
-                className="object-contain"
-                onError={(e) => {
-                  e.currentTarget.style.display = "none";
-                }}
-              />
+              {!headerImageError && draftAgent?.agentImage ? (
+                <img
+                  key={draftAgent.agentImage}
+                  alt="logo"
+                  src={draftAgent.agentImage}
+                  width={28}
+                  height={28}
+                  className="object-contain"
+                  onError={() => setHeaderImageError(true)}
+                />
+              ) : (
+                <Bot className="h-5 w-5 text-muted-foreground" />
+              )}
             </div>
             <div>
               <SheetTitle>Edit Agent</SheetTitle>

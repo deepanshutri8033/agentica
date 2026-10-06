@@ -3,15 +3,12 @@ import { db, users } from "@/db";
 import { NextRequest, NextResponse } from "next/server";
 import { eq } from "drizzle-orm";
 
-export async function POST(req: NextRequest) {
+async function getCurrentDbUser() {
   const user = await currentUser();
   const userEmail = user?.primaryEmailAddress?.emailAddress;
 
   if (!user || !userEmail) {
-    return NextResponse.json(
-      { error: "Unauthorized or email missing" },
-      { status: 401 }
-    );
+    return null;
   }
 
   const userResult = await db
@@ -19,7 +16,6 @@ export async function POST(req: NextRequest) {
     .from(users)
     .where(eq(users.email, userEmail));
 
-  // If user does not exist, insert them
   if (userResult.length === 0) {
     const result = await db
       .insert(users)
@@ -29,9 +25,31 @@ export async function POST(req: NextRequest) {
       })
       .returning();
 
-    return NextResponse.json(result[0]);
+    return result[0];
   }
 
-  // Return existing user if found
-  return NextResponse.json(userResult[0]);
+  return userResult[0];
+}
+
+export async function GET() {
+  const userRecord = await getCurrentDbUser();
+
+  if (!userRecord) {
+    return NextResponse.json({ error: "Unauthorized or email missing" }, { status: 401 });
+  }
+
+  return NextResponse.json(userRecord);
+}
+
+export async function POST(req: NextRequest) {
+  const userRecord = await getCurrentDbUser();
+
+  if (!userRecord) {
+    return NextResponse.json(
+      { error: "Unauthorized or email missing" },
+      { status: 401 }
+    );
+  }
+
+  return NextResponse.json(userRecord);
 }

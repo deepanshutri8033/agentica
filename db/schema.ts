@@ -71,7 +71,7 @@ export const tools = pgTable("tools", {
 // ---------------------------------------------
 export const AgentConfig = pgTable("agentConfig", {
   id: serial("id").primaryKey(),
-  userEmail: text("userEmail").references(() => users.email),
+  userEmail: text("userEmail").references(() => users.email, { onDelete: "cascade" }),
   agentId: varchar("agentId").notNull().unique(),
   name: varchar("name"),
   agentImage: varchar("agentImage"),
@@ -83,12 +83,34 @@ export const AgentConfig = pgTable("agentConfig", {
   schedule: jsonb("schedule").$type<{
     type?: string;
     frequency?: string;
+    intervalMinutes?: number;
     time?: string;
+    cron?: string;
   }>(),
   status: varchar("status", { length: 50 }).default("active"), // active, pause
   outputFormat: text("outputFormat"),
-  composioSessionId:varchar('composio'),
+  composioSessionId: varchar("composio"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+// ---------------------------------------------
+// Agent Runs Table (Inngest Scheduled Runs)
+// ---------------------------------------------
+export const agentRuns = pgTable("agentRuns", {
+  id: serial("id").primaryKey(),
+  agentId: varchar("agent_id", { length: 100 }).notNull(),
+  userEmail: text("user_email"),
+  status: varchar("status", { length: 50 }).default("scheduled").notNull(), // scheduled, queued, running, completed, failed, cancelled
+  scheduledFor: timestamp("scheduled_for").notNull(),
+  queuedAt: timestamp("queued_at"),
+  inngestEventId: varchar("inngest_event_id", { length: 255 }),
+  executedAt: timestamp("executed_at"),
+  completedAt: timestamp("completed_at"),
+  input: text("input"),
+  result: jsonb("result").$type<Record<string, any>>(),
+  error: text("error"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 
 // ---------------------------------------------
@@ -102,3 +124,6 @@ export type NewTool = typeof tools.$inferInsert;
 
 export type AgentConfigType = typeof AgentConfig.$inferSelect;
 export type NewAgentConfigType = typeof AgentConfig.$inferInsert;
+
+export type AgentRun = typeof agentRuns.$inferSelect;
+export type NewAgentRun = typeof agentRuns.$inferInsert;

@@ -46,9 +46,14 @@ function MyAgents() {
     try {
       setLoading(true);
       const result = await axios.get("/api/agent/configure");
-      setMyAgents(result.data || []);
+      // Fallback check to ensure data is always an array
+      const agentList = Array.isArray(result.data)
+        ? result.data
+        : result.data?.agents || [];
+      setMyAgents(agentList);
     } catch (error) {
       console.error("Failed to fetch user agents:", error);
+      toast.error("Failed to load user agents");
     } finally {
       setLoading(false);
     }
@@ -87,6 +92,43 @@ function MyAgents() {
     }
   };
 
+  const handleTogglePause = async (agent: CreatedAgentType) => {
+    try {
+      const newStatus = agent.status === "paused" ? "active" : "paused";
+      toast.info(`${newStatus === "paused" ? "Pausing" : "Resuming"} ${agent.name}...`);
+
+      await axios.put("/api/agent/configure", {
+        agentId: agent.agentId,
+        status: newStatus,
+      });
+
+      setMyAgents((prev) =>
+        prev.map((a) =>
+          a.agentId === agent.agentId ? { ...a, status: newStatus } : a
+        )
+      );
+      toast.success(`${agent.name} is now ${newStatus}!`);
+    } catch (err: any) {
+      console.error("Failed to update status:", err);
+      toast.error(err.response?.data?.error || "Failed to update agent status");
+    }
+  };
+
+  const handleDeleteAgent = async (agent: CreatedAgentType) => {
+    if (!confirm(`Are you sure you want to delete "${agent.name}"?`)) return;
+
+    try {
+      toast.info(`Deleting ${agent.name}...`);
+      await axios.delete(`/api/agent/configure?agentId=${agent.agentId}`);
+
+      setMyAgents((prev) => prev.filter((a) => a.agentId !== agent.agentId));
+      toast.success(`${agent.name} deleted!`);
+    } catch (err: any) {
+      console.error("Failed to delete agent:", err);
+      toast.error(err.response?.data?.error || "Failed to delete agent");
+    }
+  };
+
   const handleOpenChat = (agent: CreatedAgentType) => {
     setChatAgent(agent);
     setIsChatOpen(true);
@@ -110,6 +152,7 @@ function MyAgents() {
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
           {myAgents?.map((agent, index) => {
             const isRunning = runningAgentId === agent.agentId;
+            const isPaused = agent.status === "paused";
 
             return (
               <div
@@ -121,11 +164,18 @@ function MyAgents() {
                     <div className="size-16 p-2 bg-slate-100 dark:bg-zinc-800/60 border rounded-2xl flex items-center justify-center shrink-0 overflow-hidden">
                       <img
                         key={agent.agentImage}
-                        src={agent.agentImage || "/logo.svg"}
+                        src={
+                          agent.agentImage && !agent.agentImage.includes("/default-agent.png")
+                            ? agent.agentImage
+                            : `https://api.dicebear.com/10.x/micah/svg?seed=${encodeURIComponent(agent.name || agent.agentId)}`
+                        }
                         alt={agent.name || "Agent"}
                         width={40}
                         height={40}
                         className="object-contain"
+                        onError={(e) => {
+                          e.currentTarget.src = `https://api.dicebear.com/10.x/micah/svg?seed=${encodeURIComponent(agent.name || agent.agentId)}`;
+                        }}
                       />
                     </div>
 
@@ -148,8 +198,19 @@ function MyAgents() {
                           >
                             <Play className="mr-2 h-4 w-4" /> Run Now
                           </DropdownMenuItem>
-                          <DropdownMenuItem className="cursor-pointer">
-                            <PauseIcon className="mr-2 h-4 w-4" /> Pause Agent
+                          <DropdownMenuItem
+                            className="cursor-pointer"
+                            onClick={() => handleTogglePause(agent)}
+                          >
+                            {isPaused ? (
+                              <>
+                                <Play className="mr-2 h-4 w-4 text-emerald-600" /> Resume Agent
+                              </>
+                            ) : (
+                              <>
+                                <PauseIcon className="mr-2 h-4 w-4 text-amber-600" /> Pause Agent
+                              </>
+                            )}
                           </DropdownMenuItem>
                           <DropdownMenuItem
                             className="cursor-pointer"
@@ -163,7 +224,10 @@ function MyAgents() {
                         </DropdownMenuGroup>
                         <DropdownMenuSeparator />
                         <DropdownMenuGroup>
-                          <DropdownMenuItem className="text-red-600 focus:text-red-600 focus:bg-red-50 dark:focus:bg-red-950/50 cursor-pointer">
+                          <DropdownMenuItem
+                            onClick={() => handleDeleteAgent(agent)}
+                            className="text-red-600 focus:text-red-600 focus:bg-red-50 dark:focus:bg-red-950/50 cursor-pointer"
+                          >
                             <Trash className="mr-2 h-4 w-4" /> Delete Agent
                           </DropdownMenuItem>
                         </DropdownMenuGroup>

@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import axios from "axios";
 import {
   BriefcaseBusiness,
@@ -12,6 +12,7 @@ import {
   Loader2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { toast } from "sonner";
 import AIAgentQuestions from "./AIAgentQuestions";
 import NewAgentCard from "./NewAgentCard";
 
@@ -116,22 +117,33 @@ export type CreatedAgentType = {
   outputFormat: string;
   status: string;
   createdAt: string;
-  composioSessionId:string;
+  composioSessionId: string;
 };
 
-function CreateAgent() {
-  const [prompt, setPrompt] = useState("");
+function CreateAgent({ initialPrompt = "" }: { initialPrompt?: string }) {
+  const [prompt, setPrompt] = useState(initialPrompt);
   const [configResult, setConfigResult] = useState<AgentConfigResp | null>(null);
   const [loading, setLoading] = useState(false);
   const [createdAgent, setCreatedAgent] = useState<CreatedAgentType | null>(null);
+
+  // Pre-fill prompt from template
+  useEffect(() => {
+    if (initialPrompt) {
+      setPrompt(initialPrompt);
+    }
+  }, [initialPrompt]);
 
   const onSubmit = async () => {
     if (!prompt.trim()) return;
     setLoading(true);
 
     try {
+      const userTimezone =
+        Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+
       const result = await axios.post("/api/agent/configure", {
         prompt: prompt,
+        timezone: userTimezone,
       });
 
       setConfigResult(result.data);
@@ -141,11 +153,9 @@ function CreateAgent() {
           result.data?.agent || (Array.isArray(result.data) ? result.data[0] : result.data);
         setCreatedAgent(savedRecord);
       }
-    } catch (err: any) {
-      const errorMsg =
-        err.response?.data?.error || err.message || "Failed to configure agent";
-      console.error("Configuration request failed:", errorMsg);
-      alert(errorMsg);
+    } catch (error) {
+      console.error("Configuration request failed:", error);
+      toast.error("Couldn't create your agent. Please try again.");
     } finally {
       setLoading(false);
     }
@@ -157,8 +167,12 @@ function CreateAgent() {
     setLoading(true);
 
     try {
+      const userTimezone =
+        Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+
       const result = await axios.post("/api/agent/configure", {
         prompt: updatedPrompt,
+        timezone: userTimezone,
       });
 
       setConfigResult(result.data);
@@ -168,11 +182,9 @@ function CreateAgent() {
           result.data?.agent || (Array.isArray(result.data) ? result.data[0] : result.data);
         setCreatedAgent(savedRecord);
       }
-    } catch (err: any) {
-      const errorMsg =
-        err.response?.data?.error || err.message || "Failed to finalize agent configuration";
-      console.error("Finalization request failed:", errorMsg);
-      alert(errorMsg);
+    } catch (error) {
+      console.error("Finalization request failed:", error);
+      toast.error("Couldn't finish setting up your agent. Please try again.");
     } finally {
       setLoading(false);
     }

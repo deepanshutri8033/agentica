@@ -4,6 +4,12 @@ import { db } from "@/db";
 import { AgentConfig } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { getOrCreateAgentSession } from "@/lib/get-agent-composio-session";
+import { getUserConnectedAccounts, normalizeToolkitSlug } from "@/lib/composio-connected-accounts";
+
+// Normalize slug for comparison
+function normalizeSlug(s: string): string {
+  return s.toLowerCase().replace(/[\s_-]/g, "");
+}
 
 export async function GET(req: NextRequest) {
   try {
@@ -38,40 +44,74 @@ export async function GET(req: NextRequest) {
     const userEmail =
       user?.primaryEmailAddress?.emailAddress ||
       agentConfig.userEmail ||
-      userId;
+      `user_${userId}@app.com`;
 
-    // 2. Retrieve session
+    // 2. Retrieve Composio session to get toolkit list
     const session: any = await getOrCreateAgentSession(
       agentConfig as any,
       userEmail
     );
 
-    if (!session) {
-      return NextResponse.json(
-        { error: "Failed to establish Composio session" },
-        { status: 500 }
-      );
-    }
-
-    // 3. Extract toolkits safely across SDK variations
     let toolkits: any[] = [];
 
-    if (typeof session.toolkits === "function") {
-      const res = await session.toolkits();
-      toolkits = Array.isArray(res) ? res : res?.items || res?.data || [];
-    } else if (typeof session.getToolkits === "function") {
-      const res = await session.getToolkits();
-      toolkits = Array.isArray(res) ? res : res?.items || res?.data || [];
-    } else if (Array.isArray(session.toolkits)) {
-      toolkits = session.toolkits;
+    if (!session) {
+      // Build basic toolkit list from agent config tools
+      const rawTools = (agentConfig.tools as any[]) || [];
+      toolkits = rawTools.map((t: any) => ({
+        slug: typeof t === "string" ? t : t?.slug || t?.name || "",
+        name: typeof t === "string" ? t : t?.name || t?.slug || "",
+        connected: false,
+      }));
+    } else {
+      if (typeof session.toolkits === "function") {
+        const res = await session.toolkits();
+        toolkits = Array.isArray(res) ? res : res?.items || res?.data || [];
+      } else if (typeof session.getToolkits === "function") {
+        const res = await session.getToolkits();
+        toolkits = Array.isArray(res) ? res : res?.items || res?.data || [];
+      } else if (Array.isArray(session.toolkits)) {
+        toolkits = session.toolkits;
+      } else if (Array.isArray(session.tools)) {
+        toolkits = session.tools;
+      }
     }
 
-    return NextResponse.json({ success: true, toolkits }, { status: 200 });
-  } catch (error: any) {
-    console.error("Failed to fetch agent tools:", error);
+    const connectedAccounts = await getUserConnectedAccounts(userEmail);
+    const accountBySlug = new Map(
+      connectedAccounts.map((account) => [
+        normalizeToolkitSlug(account.toolkit.slug),
+        account,
+      ])
+    );
+
+    // 4. Enrich each toolkit with connected status
+    const enrichedToolkits = toolkits.map((tool: any) => {
+      const slug = typeof tool === "string" ? tool : tool?.slug || tool?.name || "";
+      const account = accountBySlug.get(normalizeToolkitSlug(slug));
+      const isConnected = Boolean(account);
+      return {
+        ...(typeof tool === "object" ? tool : {}),
+        slug,
+        name: tool?.name || slug,
+        connected: isConnected,
+        connectedAccountId: account?.id,
+        connection: isConnected
+          ? { status: "ACTIVE", connectedAccount: account?.id }
+          : { status: "NOT_CONNECTED" },
+      };
+    });
+
+    const sessionId = session?.sessionId || session?.id || null;
+
     return NextResponse.json(
-      { error: error?.message || "Failed to fetch agent tools" },
-      { status: 500 }
+      { success: true, toolkits: enrichedToolkits, tools: enrichedToolkits, sessionId },
+      { status: 200 }
+    );
+  } catch (error: any) {
+    console.error("Failed to fetch agent tools:", error?.message || error);
+    return NextResponse.json(
+      { success: false, error: "Unable to load agent tool status right now." },
+      { status: 502 }
     );
   }
-}
+}

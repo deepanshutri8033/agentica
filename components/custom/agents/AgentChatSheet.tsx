@@ -12,7 +12,6 @@ import {
   SheetTitle,
   SheetDescription,
 } from "@/components/ui/sheet";
-import { toast } from "sonner";
 import type { CreatedAgentType } from "./createAgent";
 
 export type ChatMessage = {
@@ -88,19 +87,19 @@ export default function AgentChatSheet({ agent, open, onOpenChange }: Props) {
       };
 
       setMessages((prev) => [...prev, agentMessage]);
-    } catch (error: any) {
+    } catch (error) {
       console.error("Chat error:", error);
-      const errMsg =
-        error.response?.data?.error ||
-        "Sorry, I couldn't process your message. Please try again.";
+      const errorMessage =
+        axios.isAxiosError(error) && typeof error.response?.data?.error === "string"
+          ? error.response.data.error
+          : "Sorry, I couldn't complete that request right now. Please try again.";
 
-      toast.error(errMsg);
       setMessages((prev) => [
         ...prev,
         {
           id: crypto.randomUUID(),
           role: "agent",
-          content: `Error: ${errMsg}`,
+          content: errorMessage,
         },
       ]);
     } finally {
@@ -123,11 +122,15 @@ export default function AgentChatSheet({ agent, open, onOpenChange }: Props) {
             <div className="h-10 w-10 relative flex items-center justify-center rounded-xl bg-muted/40 border shrink-0 overflow-hidden">
               <img
                 src={
-                  agent?.agentImage ||
-                  `https://api.dicebear.com/10.x/micah/svg?seed=${agent?.name || "agent"}`
+                  agent?.agentImage && !agent.agentImage.includes("/default-agent.png")
+                    ? agent.agentImage
+                    : `https://api.dicebear.com/10.x/micah/svg?seed=${encodeURIComponent(agent?.name || agent?.agentId || "agent")}`
                 }
                 alt={agent?.name || "Agent"}
                 className="h-full w-full object-cover"
+                onError={(e) => {
+                  e.currentTarget.src = `https://api.dicebear.com/10.x/micah/svg?seed=${encodeURIComponent(agent?.name || "agent")}`;
+                }}
               />
             </div>
             <div className="text-left min-w-0 flex-1">

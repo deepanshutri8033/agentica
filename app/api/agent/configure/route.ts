@@ -1,19 +1,47 @@
-import { groq } from "@/lib/groq";
+import { ai } from "@/lib/gemini";
 import { NextRequest, NextResponse } from "next/server";
 import { auth, currentUser } from "@clerk/nextjs/server";
 import { db } from "@/db";
-import { AgentConfig } from "@/db/schema";
+import { AgentConfig, agentRuns } from "@/db/schema";
+import { eq, desc } from "drizzle-orm";
 
 export const runtime = "nodejs";
 
-// Updated active Groq model list
-const MODELS = [
-  "llama-3.3-70b-versatile",
-  "llama-3.1-8b-instant",
-  "qwen-2.5-72b-instruct",
-  "deepseek-r1-distill-llama-70b"
+const GEMINI_MODELS = [
+  "gemini-3.8-flash",
+  "gemini-3.5-flash",
+  "gemini-flash-latest",
 ];
 
+// GET: Fetch all agents owned by the logged-in user
+export async function GET(req: NextRequest) {
+  try {
+    const { userId } = await auth();
+    if (!userId) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
+    const user = await currentUser();
+    const userEmail =
+      user?.primaryEmailAddress?.emailAddress || `user_${userId}@app.com`;
+
+    const userAgents = await db
+      .select()
+      .from(AgentConfig)
+      .where(eq(AgentConfig.userEmail, userEmail))
+      .orderBy(desc(AgentConfig.createdAt));
+
+    return NextResponse.json(userAgents, { status: 200 });
+  } catch (err: any) {
+    console.error("Failed to fetch user agents:", err);
+    return NextResponse.json(
+      { error: err?.message || "Internal Server Error" },
+      { status: 500 }
+    );
+  }
+}
+
+// POST: Generate interactive clarification questions or final agent config via Gemini
 export async function POST(req: NextRequest) {
   try {
     const { userId } = await auth();
@@ -35,53 +63,175 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    let completion = null;
-    let lastError: any = null;
+    // Determine if this is initial prompt or final submission with answers
+    const isClarificationAnswered = prompt.includes("Clarification details:");
 
-    for (const model of MODELS) {
-      try {
-        completion = await groq.chat.completions.create({
-          model: model,
-          messages: [
+    if (!isClarificationAnswered) {
+      // -------------------------------------------------------------
+      // STEP 1: Generate Interactive Clarification Questions
+      // -------------------------------------------------------------
+      let responseText = "";
+      let lastError: any = null;
+
+      const systemInstruction = `You are an AI Agent builder. Analyze the user request and generate 2 relevant, specific clarification questions to help tailor the agent's behavior, tone, destination, or schedule.
+Respond ONLY in valid JSON matching this exact structure:
+{
+  "status": "needs_clarification",
+  "clarificationQuestions": [
+    {
+      "id": "q1",
+      "question": "string",
+      "type": "single_select",
+      "options": ["string", "string", "string", "Other / Custom"],
+      "allowCustom": true,
+      "customPlaceholder": "string"
+    },
+    {
+      "id": "q2",
+      "question": "string",
+      "type": "single_select",
+      "options": ["string", "string", "string", "Other / Custom"],
+      "allowCustom": true,
+      "customPlaceholder": "string"
+    }
+  ]
+}
+Do not wrap in markdown syntax.`;
+
+      for (const model of GEMINI_MODELS) {
+        try {
+          const response = await ai.models.generateContent({
+            model,
+            contents: `User Agent Request: ${prompt}`,
+            config: {
+              systemInstruction,
+              responseMimeType: "application/json",
+              temperature: 0.3,
+            },
+          });
+
+          if (response.text) {
+            responseText = response.text;
+            break;
+          }
+        } catch (err: any) {
+          lastError = err;
+        }
+      }
+
+      if (responseText) {
+        responseText = responseText.trim();
+        if (responseText.startsWith("```")) {
+          responseText = responseText
+            .replace(/^```(?:json)?\n?/, "")
+            .replace(/\n?```$/, "");
+        }
+
+        try {
+          const parsed = JSON.parse(responseText);
+          if (parsed.clarificationQuestions && parsed.clarificationQuestions.length > 0) {
+            return NextResponse.json(parsed, { status: 200 });
+          }
+        } catch (e) {
+          console.warn("Failed to parse clarification JSON, falling back to default questions");
+        }
+      }
+
+      // Fallback default questions if model fails to output valid JSON
+      return NextResponse.json(
+        {
+          status: "needs_clarification",
+          clarificationQuestions: [
             {
-              role: "system",
-              content:
-                'You are an AI Agent builder assistant. Generate agent configuration details based on user intent. Respond ONLY in valid JSON matching this exact structure: {"name": "string", "description": "string", "instructions": "string", "suggestedTools": ["string"]}. Do not wrap response in markdown blocks.',
+              id: "q1",
+              question: "What kind of greeting message or content would you like to send?",
+              type: "single_select",
+              options: [
+                "Friendly good evening greeting",
+                "Motivational quote & check-in",
+                "Daily reflection & wrap-up",
+                "Other / Custom",
+              ],
+              allowCustom: true,
+              customPlaceholder: "Specify custom message...",
             },
             {
-              role: "user",
-              content: prompt,
+              id: "q2",
+              question: "Where should this agent post or deliver updates?",
+              type: "single_select",
+              options: [
+                "Personal Slack channel",
+                "Direct message to myself",
+                "Team Announcements channel",
+                "Other / Custom",
+              ],
+              allowCustom: true,
+              customPlaceholder: "Specify custom destination...",
             },
           ],
-          response_format: { type: "json_object" },
-          temperature: 0.2,
-          max_tokens: 1024,
+        },
+        { status: 200 }
+      );
+    }
+
+    // -------------------------------------------------------------
+    // STEP 2: Finalize Agent Config & Save to Database + Schedule Run
+    // -------------------------------------------------------------
+    let responseText = "";
+    let lastError: any = null;
+
+    const finalSystemInstruction = `You are an AI Agent builder assistant. Create the complete agent configuration based on user intent and clarification answers.
+Respond in valid JSON with this exact structure:
+{
+  "name": "string",
+  "description": "string",
+  "instructions": "string",
+  "suggestedTools": ["string"],
+  "schedule": {
+    "type": "recurring",
+    "frequency": "daily",
+    "time": "22:00",
+    "intervalMinutes": 1440
+  }
+}
+Do not wrap response in markdown blocks.`;
+
+    for (const model of GEMINI_MODELS) {
+      try {
+        const response = await ai.models.generateContent({
+          model,
+          contents: prompt,
+          config: {
+            systemInstruction: finalSystemInstruction,
+            responseMimeType: "application/json",
+            temperature: 0.2,
+          },
         });
 
-        if (completion?.choices[0]?.message?.content) {
+        if (response.text) {
+          responseText = response.text;
           break;
         }
       } catch (err: any) {
         lastError = err;
-        console.warn(`Groq model '${model}' failed: ${err?.message}`);
       }
     }
 
-    let content = completion?.choices[0]?.message?.content;
-
-    if (!content) {
+    if (!responseText) {
       return NextResponse.json(
-        { error: lastError?.message || "Failed to generate configuration with Groq models" },
+        { error: lastError?.message || "Failed to finalize agent configuration." },
         { status: 500 }
       );
     }
 
-    content = content.trim();
-    if (content.startsWith("```")) {
-      content = content.replace(/^```(?:json)?\n?/, "").replace(/\n?```$/, "");
+    responseText = responseText.trim();
+    if (responseText.startsWith("```")) {
+      responseText = responseText
+        .replace(/^```(?:json)?\n?/, "")
+        .replace(/\n?```$/, "");
     }
 
-    const parsedConfig = JSON.parse(content);
+    const parsedConfig = JSON.parse(responseText);
     const generatedAgentId = `agent_${Math.random().toString(36).substring(2, 11)}`;
 
     const newAgentRecord = {
@@ -94,15 +244,27 @@ export async function POST(req: NextRequest) {
       objective: prompt,
       tools: parsedConfig.suggestedTools || [],
       skills: [],
-      schedule: { type: "manual" },
+      schedule: parsedConfig.schedule || { type: "recurring", frequency: "daily" },
       outputFormat: "text",
       status: "active",
-      createdAt: new Date().toISOString(),
+      createdAt: new Date(),
       composioSessionId: "",
     };
 
-    // Save newly configured agent to database
+    // Save agent config record to PostgreSQL database
     await db.insert(AgentConfig).values(newAgentRecord as any);
+
+    // If scheduled or recurring, insert initial run into agentRuns table
+    const firstRunDate = new Date(Date.now() + 5 * 60 * 1000); // 5 minutes from now for initial scheduled execution
+    await db.insert(agentRuns).values({
+      agentId: generatedAgentId,
+      userEmail,
+      status: "scheduled",
+      scheduledFor: firstRunDate,
+      input: parsedConfig.instructions || prompt,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
 
     return NextResponse.json(
       {
@@ -114,7 +276,98 @@ export async function POST(req: NextRequest) {
       { status: 200 }
     );
   } catch (err: any) {
-    console.error("Groq Agent Configure API Error:", err);
+    console.error("Gemini Agent Configure API Error:", err);
+    return NextResponse.json(
+      { error: err?.message || "Internal Server Error" },
+      { status: 500 }
+    );
+  }
+}
+
+// PUT: Update an existing agent config (status, instructions, schedule, etc.)
+export async function PUT(req: NextRequest) {
+  try {
+    const { userId } = await auth();
+    if (!userId) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
+    const body = await req.json();
+    const { agentId } = body;
+
+    if (!agentId) {
+      return NextResponse.json({ error: "agentId is required" }, { status: 400 });
+    }
+
+    const editableFields = [
+      "name",
+      "agentImage",
+      "description",
+      "instructions",
+      "objective",
+      "tools",
+      "skills",
+      "schedule",
+      "outputFormat",
+      "status",
+    ] as const;
+    const updateFields = Object.fromEntries(
+      editableFields
+        .filter((field) => Object.hasOwn(body, field))
+        .map((field) => [field, body[field]])
+    ) as Partial<typeof AgentConfig.$inferInsert>;
+
+    if (Object.keys(updateFields).length === 0) {
+      return NextResponse.json(
+        { error: "No editable agent fields were provided" },
+        { status: 400 }
+      );
+    }
+
+    const [updatedAgent] = await db
+      .update(AgentConfig)
+      .set(updateFields)
+      .where(eq(AgentConfig.agentId, agentId))
+      .returning();
+
+    if (!updatedAgent) {
+      return NextResponse.json({ error: "Agent not found" }, { status: 404 });
+    }
+
+    return NextResponse.json({ success: true, agentId, ...updateFields }, { status: 200 });
+  } catch (err: any) {
+    console.error("Failed to update agent:", err);
+    return NextResponse.json(
+      { error: err?.message || "Internal Server Error" },
+      { status: 500 }
+    );
+  }
+}
+
+// DELETE: Delete an agent and its associated scheduled runs
+export async function DELETE(req: NextRequest) {
+  try {
+    const { userId } = await auth();
+    if (!userId) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
+    const { searchParams } = new URL(req.url);
+    const body = await req.json().catch(() => ({}));
+    const agentId = searchParams.get("agentId") || body.agentId;
+
+    if (!agentId) {
+      return NextResponse.json({ error: "agentId is required" }, { status: 400 });
+    }
+
+    // Delete associated runs first
+    await db.delete(agentRuns).where(eq(agentRuns.agentId, agentId));
+    // Delete agent config
+    await db.delete(AgentConfig).where(eq(AgentConfig.agentId, agentId));
+
+    return NextResponse.json({ success: true, deletedAgentId: agentId }, { status: 200 });
+  } catch (err: any) {
+    console.error("Failed to delete agent:", err);
     return NextResponse.json(
       { error: err?.message || "Internal Server Error" },
       { status: 500 }

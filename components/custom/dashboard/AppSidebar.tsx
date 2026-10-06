@@ -37,7 +37,10 @@ export function AppSidebar() {
 
   return (
     <Sidebar>
-      <SidebarHeader className="flex flex-row items-center gap-2.5 px-4 py-7">
+      <SidebarHeader
+        onClick={() => router.push("/")}
+        className="flex flex-row items-center gap-2.5 px-4 py-7 cursor-pointer hover:opacity-80 transition-opacity"
+      >
         <Image src="/logo.svg" height={40} width={40} alt="logo" />
         <h2 className="text-lg font-semibold text-slate-900">Agentica</h2>
       </SidebarHeader>
@@ -118,6 +121,7 @@ export function AppSidebar() {
           <SidebarMenu>
             <SidebarMenuItem>
               <SidebarMenuButton 
+                onClick={() => router.push("/dashboard/settings")}
                 className={`h-12 gap-3 hover:bg-slate-100 ${
                   path==("/dashboard/settings") ? "bg-slate-100" : ""
                 }`}
@@ -131,6 +135,7 @@ export function AppSidebar() {
 
             <SidebarMenuItem>
               <SidebarMenuButton
+                onClick={() => router.push("/dashboard/profile")}
                 className={`h-12 gap-3 hover:bg-slate-100 ${
                   path==("/dashboard/profile") ? "bg-slate-100" : ""
                 }`}

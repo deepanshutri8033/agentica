@@ -2,9 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { auth, currentUser } from "@clerk/nextjs/server";
 import { db } from "@/db";
 import { AgentConfig } from "@/db/schema";
-import { eq } from "drizzle-orm";
-import { getOrCreateAgentSession } from "@/lib/get-agent-composio-session";
+import { and, eq } from "drizzle-orm";
 import { composio } from "@/lib/composio";
+import { getUserConnectedAccounts, normalizeToolkitSlug } from "@/lib/composio-connected-accounts";
 
 const SLUG_MAP: Record<string, string> = {
   web_search: "tavily",
@@ -59,55 +59,47 @@ export async function POST(req: NextRequest) {
 
     const normalizedSlug = SLUG_MAP[cleanSlug] || cleanSlug;
 
-    // 2. Fetch agent configuration
-    const agentRecords = await db
-      .select()
-      .from(AgentConfig)
-      .where(eq(AgentConfig.agentId, agentId));
-
-    if (!agentRecords || agentRecords.length === 0) {
-      return NextResponse.json({ error: "Agent not found" }, { status: 404 });
-    }
-
-    const agentConfig = agentRecords[0];
     const user = await currentUser();
     const userEmail =
-      user?.primaryEmailAddress?.emailAddress ||
-      agentConfig.userEmail ||
-      userId;
+      user?.primaryEmailAddress?.emailAddress || `user_${userId}@app.com`;
 
-    // 3. Retrieve or create Composio session
-    const session: any = await getOrCreateAgentSession(agentConfig as any, userEmail);
+    if (agentId) {
+      const agentRecords = await db
+        .select({ agentId: AgentConfig.agentId })
+        .from(AgentConfig)
+        .where(
+          and(
+            eq(AgentConfig.agentId, agentId),
+            eq(AgentConfig.userEmail, userEmail)
+          )
+        )
+        .limit(1);
 
-    let redirectUrl = "";
-
-    // Method 1: Try session.authorize with safe string fallback
-    if (session && typeof session.authorize === "function") {
-      try {
-        const res = await session.authorize(normalizedSlug);
-        redirectUrl = res?.redirectUrl || res?.url || res?.data?.redirectUrl || "";
-      } catch (e: any) {
-        console.warn("session.authorize failed, falling back to direct initiate:", e?.message);
+      if (!agentRecords.length) {
+        return NextResponse.json({ error: "Agent not found" }, { status: 404 });
       }
     }
 
-    // Method 2: Fallback to direct composio.connectedAccounts.initiate
-    if (!redirectUrl) {
-      try {
-        const connection = await composio.connectedAccounts.initiate({
-          entityId: userEmail,
-          appName: normalizedSlug,
-        });
+    const authConfigs = await composio.authConfigs.list({
+      toolkit: normalizedSlug,
+    });
+    const authConfigId = authConfigs.items[0]?.id;
 
-        redirectUrl =
-          (connection as any)?.redirectUrl ||
-          (connection as any)?.url ||
-          (connection as any)?.data?.redirectUrl ||
-          "";
-      } catch (e: any) {
-        console.warn("composio.connectedAccounts.initiate fallback error:", e?.message);
-      }
+    if (!authConfigId) {
+      return NextResponse.json(
+        {
+          error: `No authentication configuration found for ${normalizedSlug}. Please enable or configure this integration in Composio.`,
+        },
+        { status: 400 }
+      );
     }
+
+    const connection = await composio.connectedAccounts.link(
+      userEmail,
+      authConfigId,
+      { allowMultiple: true }
+    );
+    const redirectUrl = connection.redirectUrl;
 
     if (!redirectUrl) {
       return NextResponse.json(
@@ -148,107 +140,33 @@ export async function DELETE(req: NextRequest) {
       );
     }
 
-    // 1. Fetch agent record
-    const result = await db
-      .select()
-      .from(AgentConfig)
-      .where(eq(AgentConfig.agentId, agentId));
-
-    if (!result || result.length === 0) {
-      return NextResponse.json({ error: "Agent not found" }, { status: 404 });
-    }
-
-    const agentConfig = result[0];
     const user = await currentUser();
     const userEmail =
-      user?.primaryEmailAddress?.emailAddress ||
-      agentConfig.userEmail ||
-      userId;
+      user?.primaryEmailAddress?.emailAddress || `user_${userId}@app.com`;
 
-    // 2. Retrieve session
-    const session: any = await getOrCreateAgentSession(agentConfig as any, userEmail);
+    if (agentId) {
+      const agentRecords = await db
+        .select({ agentId: AgentConfig.agentId })
+        .from(AgentConfig)
+        .where(
+          and(
+            eq(AgentConfig.agentId, agentId),
+            eq(AgentConfig.userEmail, userEmail)
+          )
+        )
+        .limit(1);
 
-    if (!session) {
-      return NextResponse.json(
-        { error: "Failed to establish Composio session" },
-        { status: 500 }
-      );
+      if (!agentRecords.length) {
+        return NextResponse.json({ error: "Agent not found" }, { status: 404 });
+      }
     }
 
-    // 3. Find target toolkit
-    let rawToolkits: any = null;
-    if (typeof session.toolkits === "function") {
-      rawToolkits = await session.toolkits();
-    }
+    const normalizedSlug = normalizeToolkitSlug(String(toolSlug));
+    const accounts = await getUserConnectedAccounts(userEmail, normalizedSlug);
 
-    const toolkitList: any[] = Array.isArray(rawToolkits)
-      ? rawToolkits
-      : Array.isArray(rawToolkits?.items)
-      ? rawToolkits.items
-      : [];
-
-    const targetSlug = String(toolSlug).toLowerCase().trim();
-    const toolKit = toolkitList.find(
-      (item: any) =>
-        item.slug?.toLowerCase() === targetSlug ||
-        item.name?.toLowerCase() === targetSlug
+    await Promise.all(
+      accounts.map((account) => composio.connectedAccounts.delete(account.id))
     );
-
-    // Extract Account ID safely as a pure primitive string
-    const rawAccount = toolKit?.connection?.connectedAccount;
-    const accountId: string | null =
-      typeof rawAccount === "string"
-        ? rawAccount
-        : typeof rawAccount?.id === "string"
-        ? rawAccount.id
-        : Array.isArray(toolKit?.connectedAccountIds) && toolKit.connectedAccountIds[0]
-        ? String(toolKit.connectedAccountIds[0])
-        : null;
-
-    if (!accountId) {
-      return NextResponse.json(
-        { error: "Active connection not found for this tool" },
-        { status: 404 }
-      );
-    }
-
-    // 4. Delete the connection
-    let deleted = false;
-
-    if (typeof session.deleteConnectedAccount === "function") {
-      try {
-        await session.deleteConnectedAccount(accountId);
-        deleted = true;
-      } catch (e: any) {
-        console.warn("session.deleteConnectedAccount failed:", e?.message);
-      }
-    }
-
-    if (!deleted) {
-      const resV1 = await fetch(
-        `https://backend.composio.dev/api/v1/connectedAccounts/${accountId}`,
-        {
-          method: "DELETE",
-          headers: {
-            "x-api-key": process.env.COMPOSIO_API_KEY || "",
-            "Content-Type": "application/json",
-          },
-        }
-      );
-
-      if (!resV1.ok) {
-        await fetch(
-          `https://backend.composio.dev/api/v3.1/connected_accounts/${accountId}`,
-          {
-            method: "DELETE",
-            headers: {
-              "x-api-key": process.env.COMPOSIO_API_KEY || "",
-              "Content-Type": "application/json",
-            },
-          }
-        );
-      }
-    }
 
     return NextResponse.json({ success: true });
   } catch (err: any) {

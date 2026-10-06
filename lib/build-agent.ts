@@ -1,7 +1,39 @@
 import { CreatedAgentType } from "@/components/custom/agents/createAgent";
 import { getOrCreateAgentSession } from "./get-agent-composio-session";
-import { Agent } from "@openai/agents";
-import { browserbaseResearchTool } from "./browserbase-tool";
+import { Agent, OpenAIProvider } from "@openai/agents";
+import { allBrowserbaseTools } from "./browserbase-tool";
+
+async function getAgentModel() {
+  const provider =
+    process.env.AGENT_MODEL_PROVIDER?.toLowerCase() ||
+    (process.env.GEMINI_API_KEY ? "gemini" : "openai");
+
+  if (provider === "gemini") {
+    if (!process.env.GEMINI_API_KEY) {
+      throw new Error(
+        "AGENT_MODEL_PROVIDER is set to gemini, but GEMINI_API_KEY is missing."
+      );
+    }
+
+    const geminiProvider = new OpenAIProvider({
+      apiKey: process.env.GEMINI_API_KEY,
+      baseURL: "https://generativelanguage.googleapis.com/v1beta/openai/",
+      useResponses: false,
+    });
+
+    return geminiProvider.getModel(
+      process.env.GEMINI_AGENT_MODEL || "gemini-3.8-flash"
+    );
+  }
+
+  if (provider !== "openai") {
+    throw new Error(
+      `Unsupported AGENT_MODEL_PROVIDER "${provider}". Use "openai" or "gemini".`
+    );
+  }
+
+  return process.env.OPENAI_MODEL;
+}
 
 export async function buildAgent(
   agentConfig: CreatedAgentType,
@@ -47,8 +79,8 @@ Ask for confirmation before destructive or high-risk actions.
 
   return new Agent({
     name: agentConfig.name,
-    model: process.env.OPENAI_MODEL,
+    model: await getAgentModel(),
     instructions,
-    tools: [...composioTools, browserbaseResearchTool],
+    tools: [...composioTools, ...allBrowserbaseTools],
   });
 }

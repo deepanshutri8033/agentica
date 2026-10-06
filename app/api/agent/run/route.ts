@@ -47,9 +47,24 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(result);
   } catch (error: any) {
     console.error("Agent execution error:", error);
+    const isInsufficientQuota =
+      error?.code === "credit_balance_exhausted" ||
+      error?.error?.code === "credit_balance_exhausted" ||
+      error?.error?.type === "insufficient_quota";
+
+    if (isInsufficientQuota) {
+      return NextResponse.json(
+        {
+          error:
+            "The OpenAI API account has no credits remaining. Add API credits or use an API key with available billing to run agents.",
+        },
+        { status: 429 }
+      );
+    }
+
     return NextResponse.json(
       { error: error?.message || "Internal server error" },
-      { status: 500 }
+      { status: error?.status === 429 ? 429 : 500 }
     );
   }
 }

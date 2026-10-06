@@ -8,10 +8,13 @@ import { composio } from "./composio";
 const SLUG_MAP: Record<string, string> = {
   web_search: "tavily",
   search: "tavily",
+  web: "tavily",
   google_search: "serpapi",
   serp_search: "serpapi",
   serpapi_search: "serpapi",
   reddit_tool: "reddit",
+  google_calendar: "googlecalendar",
+  google_sheets: "googlesheets",
 };
 
 // Slugs that Composio's Tool Router v2 session API cannot handle as toolkits
@@ -19,31 +22,48 @@ const UNSUPPORTED_TOOLKITS = new Set([
   "browserbase",
   "browser_base",
   "exa",
+  "browser",
 ]);
+
+/**
+ * Helper to extract root toolkit names from action slugs or app names
+ * e.g., "gmail_list_messages" -> "gmail"
+ */
+function extractToolkitName(slug: string): string {
+  if (!slug) return "";
+  // First check full slug in SLUG_MAP
+  if (SLUG_MAP[slug]) return SLUG_MAP[slug];
+  // Then try root prefix
+  const root = slug.split("_")[0];
+  return SLUG_MAP[root] || root;
+}
 
 export async function getOrCreateAgentSession(
   agentConfig: CreatedAgentType,
   userEmail: string
 ) {
-  // 1. Extract, sanitize, map, and filter tool slugs
+  // 1. Extract, sanitize, map, and filter toolkit names
   const rawTools = agentConfig?.tools || [];
-  const cleanToolSlugs: string[] = rawTools
-    .map((t: any) => {
-      let val = "";
-      if (typeof t === "string") {
-        val = t;
-      } else if (typeof t === "object" && t !== null) {
-        val = t.slug || t.toolSlug || t.name || "";
-      }
-      return typeof val === "string" ? val.toLowerCase().trim() : "";
-    })
-    .filter((slug: string) => Boolean(slug) && slug !== "[object object]")
-    // Map web_search -> tavily, serp_search -> serpapi
-    .map((slug: string) => SLUG_MAP[slug] || slug)
-    // Strip out tools that crash Composio Tool Router v2
-    .filter((slug: string) => !UNSUPPORTED_TOOLKITS.has(slug));
 
-  console.log("[DEBUG COMPOSIO] Clean & verified tool slugs:", cleanToolSlugs);
+  const cleanToolkits: string[] = Array.from(
+    new Set(
+      rawTools
+        .map((t: any) => {
+          let val = "";
+          if (typeof t === "string") {
+            val = t;
+          } else if (typeof t === "object" && t !== null) {
+            val = t.slug || t.toolSlug || t.name || "";
+          }
+          return typeof val === "string" ? val.toLowerCase().trim() : "";
+        })
+        .filter((slug: string) => Boolean(slug) && slug !== "[object object]")
+        .map((slug: string) => extractToolkitName(slug))
+        .filter((toolkit: string) => Boolean(toolkit) && !UNSUPPORTED_TOOLKITS.has(toolkit))
+    )
+  );
+
+  console.log("[DEBUG COMPOSIO] Clean & verified toolkits:", cleanToolkits);
 
   // 2. Re-use existing session if available
   if (agentConfig?.composioSessionId) {
@@ -67,19 +87,34 @@ export async function getOrCreateAgentSession(
     }
   }
 
-  // 3. Create fresh Composio session
-  const session = await (composio.sessions.create as any)(userEmail, {
-    toolkits: cleanToolSlugs,
-  });
+  // 3. Create fresh Composio session with safety wrap
+  try {
+    if (!process.env.COMPOSIO_API_KEY) {
+      console.warn("COMPOSIO_API_KEY missing. Skipping session creation.");
+      return null;
+    }
 
-  const sessionId = session?.sessionId || (session as any)?.id;
+    if (cleanToolkits.length === 0) {
+      return null;
+    }
 
-  // 4. Persist newly created session ID into DB non-destructively
-  if (agentConfig?.agentId && sessionId) {
-    await saveComposioSessionId(agentConfig.agentId, sessionId);
+    const session = await (composio.sessions.create as any)(userEmail, {
+      toolkits: cleanToolkits,
+    });
+
+    const sessionId = session?.sessionId || (session as any)?.id;
+
+    // 4. Persist newly created session ID into DB non-destructively
+    if (agentConfig?.agentId && sessionId) {
+      await saveComposioSessionId(agentConfig.agentId, sessionId);
+    }
+
+    return session;
+  } catch (err: any) {
+    console.error("Composio session creation failed:", err?.message || err);
+    // Return null gracefully instead of letting the error crash API routes
+    return null;
   }
-
-  return session;
 }
 
 const saveComposioSessionId = async (agentId: string, sessionId: string) => {
