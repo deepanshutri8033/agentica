@@ -1,7 +1,81 @@
 import { CreatedAgentType } from "@/components/custom/agents/createAgent";
 import { getOrCreateAgentSession } from "./get-agent-composio-session";
-import { Agent, OpenAIProvider } from "@openai/agents";
+import {
+  Agent,
+  OpenAIProvider,
+  type Model,
+  type ModelRequest,
+  type ModelResponse,
+  type ResponseStreamEvent,
+} from "@openai/agents";
 import { allBrowserbaseTools } from "./browserbase-tool";
+
+function isRetryableGeminiError(error: any) {
+  const status = error?.status ?? error?.statusCode;
+  const code = error?.code ?? error?.error?.code;
+  const message = String(error?.message ?? error?.error?.message ?? "");
+
+  if (
+    code === "credit_balance_exhausted" ||
+    error?.error?.type === "insufficient_quota" ||
+    /no credits|quota exceeded|billing/i.test(message)
+  ) {
+    return false;
+  }
+
+  return [429, 502, 503, 504].includes(status);
+}
+
+function withGeminiModelFailover(models: Model[]): Model {
+  return {
+    async getResponse(request: ModelRequest): Promise<ModelResponse> {
+      let lastError: unknown;
+
+      for (let index = 0; index < models.length; index += 1) {
+        try {
+          return await models[index].getResponse(request);
+        } catch (error) {
+          lastError = error;
+          if (!isRetryableGeminiError(error) || index === models.length - 1) {
+            throw error;
+          }
+          console.warn(
+            `Gemini model request failed; trying fallback model ${index + 2}.`
+          );
+        }
+      }
+
+      throw lastError;
+    },
+
+    async *getStreamedResponse(
+      request: ModelRequest
+    ): AsyncIterable<ResponseStreamEvent> {
+      let lastError: unknown;
+
+      for (let index = 0; index < models.length; index += 1) {
+        const events: ResponseStreamEvent[] = [];
+        try {
+          for await (const event of models[index].getStreamedResponse(request)) {
+            events.push(event);
+          }
+          yield* events;
+          return;
+        } catch (error) {
+          lastError = error;
+          if (!isRetryableGeminiError(error) || index === models.length - 1) {
+            throw error;
+          }
+          console.warn(
+            `Gemini streamed request failed; trying fallback model ${index + 2}.`
+          );
+        }
+      }
+
+      throw lastError;
+    },
+  };
+}
 
 async function getAgentModel() {
   const provider =
@@ -21,8 +95,19 @@ async function getAgentModel() {
       useResponses: false,
     });
 
-    return geminiProvider.getModel(
-      process.env.GEMINI_AGENT_MODEL || "gemini-3.8-flash"
+    const primaryModel =
+      process.env.GEMINI_AGENT_MODEL || "gemini-3.8-flash";
+    const fallbackModels = (
+      process.env.GEMINI_AGENT_FALLBACK_MODELS ||
+      "gemini-3.5-flash,gemini-flash-latest"
+    )
+      .split(",")
+      .map((model) => model.trim())
+      .filter(Boolean);
+    const modelNames = [...new Set([primaryModel, ...fallbackModels])];
+
+    return withGeminiModelFailover(
+      await Promise.all(modelNames.map((model) => geminiProvider.getModel(model)))
     );
   }
 
