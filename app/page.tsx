@@ -272,7 +272,7 @@ export default function Home() {
       </section>
 
       {/* Features Section */}
-      <section id="features" className="max-w-7xl mx-auto px-6 py-16 border-t border-slate-200/80">
+      <section id="features" className="max-w-7xl mx-auto scroll-mt-24 px-6 py-16 border-t border-slate-200/80">
         <div className="text-center max-w-2xl mx-auto mb-12">
           <Badge variant="outline" className="text-xs font-semibold border-slate-300 mb-3">
             Core Features
@@ -312,6 +312,99 @@ export default function Home() {
               Connect Slack, Gmail, Notion, GitHub, and live Browserbase browser research directly to your agents.
             </p>
           </div>
+        </div>
+      </section>
+
+      {/* Integrations Section */}
+      <section
+        id="integrations"
+        className="max-w-7xl mx-auto scroll-mt-24 px-6 py-16 border-t border-slate-200/80"
+      >
+        <div className="text-center max-w-2xl mx-auto mb-12">
+          <Badge variant="outline" className="text-xs font-semibold border-slate-300 mb-3">
+            Connected tools
+          </Badge>
+          <h2 className="text-3xl font-extrabold text-slate-900 tracking-tight">
+            Bring your everyday services into agent workflows
+          </h2>
+          <p className="mt-3 text-sm text-slate-600 leading-relaxed">
+            Connect supported accounts through Composio. The tools available to an agent depend on
+            your connection and the permissions configured for that service.
+          </p>
+        </div>
+
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+          {[
+            "Gmail",
+            "GitHub",
+            "Slack",
+            "Notion",
+            "Google Calendar",
+            "Google Sheets",
+            "Linear",
+            "Trello",
+          ].map((integration) => (
+            <div
+              key={integration}
+              className="rounded-2xl border border-slate-200/80 bg-white px-5 py-6 text-center text-sm font-semibold text-slate-800 shadow-xs"
+            >
+              {integration}
+            </div>
+          ))}
+        </div>
+        <p className="mt-5 text-center text-xs text-slate-500">
+          Browserbase can also be configured for live web research and browser automation.
+        </p>
+      </section>
+
+      {/* Architecture Section */}
+      <section
+        id="architecture"
+        className="max-w-7xl mx-auto scroll-mt-24 px-6 py-16 border-t border-slate-200/80"
+      >
+        <div className="text-center max-w-2xl mx-auto mb-12">
+          <Badge variant="outline" className="text-xs font-semibold border-slate-300 mb-3">
+            Architecture
+          </Badge>
+          <h2 className="text-3xl font-extrabold text-slate-900 tracking-tight">
+            From agent prompt to tracked result
+          </h2>
+          <p className="mt-3 text-sm text-slate-600 leading-relaxed">
+            Agentica combines its application, database, model provider, connected tools, and
+            background scheduler to run and track work.
+          </p>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          {[
+            {
+              step: "01",
+              title: "Configure",
+              detail:
+                "The Next.js app authenticates users with Clerk and saves agent configuration and run records in PostgreSQL through Drizzle.",
+            },
+            {
+              step: "02",
+              title: "Run with tools",
+              detail:
+                "The OpenAI Agents SDK orchestrates agent execution. Gemini is used through its OpenAI-compatible endpoint by default; Composio and optional Browserbase provide tools.",
+            },
+            {
+              step: "03",
+              title: "Schedule and track",
+              detail:
+                "Inngest dispatches due scheduled runs to a worker. Agentica records run status, result, and errors for review in the dashboard.",
+            },
+          ].map((item) => (
+            <div
+              key={item.step}
+              className="rounded-2xl border border-slate-200/80 bg-white p-6 shadow-xs"
+            >
+              <p className="text-xs font-bold tracking-widest text-purple-600">{item.step}</p>
+              <h3 className="mt-3 text-lg font-bold text-slate-900">{item.title}</h3>
+              <p className="mt-2 text-sm leading-relaxed text-slate-600">{item.detail}</p>
+            </div>
+          ))}
         </div>
       </section>
 
