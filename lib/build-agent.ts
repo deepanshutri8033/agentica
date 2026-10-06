@@ -10,12 +10,54 @@ import {
 } from "@openai/agents";
 import { allBrowserbaseTools } from "./browserbase-tool";
 
+const GEMINI_MODEL_REQUEST_TIMEOUT_MS = 20_000;
+const GEMINI_MODEL_FAILOVER_TIMEOUT_MS = 45_000;
+
+export function isGeminiQuotaError(error: unknown): boolean {
+  const parts: string[] = [];
+  const seen = new Set<object>();
+
+  const collect = (value: unknown, depth = 0) => {
+    if (depth > 6 || value == null) return;
+
+    if (typeof value === "string") {
+      parts.push(value);
+      try {
+        collect(JSON.parse(value), depth + 1);
+      } catch {
+        // Error messages are often plain text rather than serialized JSON.
+      }
+      return;
+    }
+
+    if (typeof value !== "object" || seen.has(value)) return;
+    seen.add(value);
+
+    for (const [key, nested] of Object.entries(value)) {
+      if (
+        typeof nested === "string" &&
+        /message|status|code|metric|quota|type/i.test(key)
+      ) {
+        collect(nested, depth + 1);
+      } else if (typeof nested === "object" && nested !== null) {
+        collect(nested, depth + 1);
+      }
+    }
+  };
+
+  collect(error);
+  return /resource_exhausted|quota|free.?tier|daily limit|exceeded your current/i.test(
+    parts.join(" ")
+  );
+}
+
 function isRetryableGeminiError(error: any) {
   const status = error?.status ?? error?.statusCode;
   const code = error?.code ?? error?.error?.code;
   const message = String(error?.message ?? error?.error?.message ?? "");
 
   if (
+    isGeminiQuotaError(error) ||
     code === "credit_balance_exhausted" ||
     error?.error?.type === "insufficient_quota" ||
     /no credits|quota exceeded|billing/i.test(message)
@@ -30,13 +72,36 @@ function withGeminiModelFailover(models: Model[]): Model {
   return {
     async getResponse(request: ModelRequest): Promise<ModelResponse> {
       let lastError: unknown;
+      const deadline = Date.now() + GEMINI_MODEL_FAILOVER_TIMEOUT_MS;
 
       for (let index = 0; index < models.length; index += 1) {
+        const remainingMs = deadline - Date.now();
+        if (remainingMs <= 0) break;
+
+        const timeoutSignal = AbortSignal.timeout(
+          Math.min(GEMINI_MODEL_REQUEST_TIMEOUT_MS, remainingMs)
+        );
+        const signal = request.signal
+          ? AbortSignal.any([request.signal, timeoutSignal])
+          : timeoutSignal;
+
         try {
-          return await models[index].getResponse(request);
+          return await models[index].getResponse({ ...request, signal });
         } catch (error) {
+          if (request.signal?.aborted) throw error;
+
+          const timedOut = timeoutSignal.aborted;
           lastError = error;
-          if (!isRetryableGeminiError(error) || index === models.length - 1) {
+          if (
+            (!timedOut && !isRetryableGeminiError(error)) ||
+            index === models.length - 1
+          ) {
+            if (timedOut) {
+              throw Object.assign(
+                new Error("Gemini model request timed out. Please try again."),
+                { status: 503 }
+              );
+            }
             throw error;
           }
           console.warn(
@@ -45,6 +110,14 @@ function withGeminiModelFailover(models: Model[]): Model {
         }
       }
 
+      if (Date.now() >= deadline) {
+        throw Object.assign(
+          new Error(
+            "Gemini models did not respond within 45 seconds. Please try again shortly."
+          ),
+          { status: 503 }
+        );
+      }
       throw lastError;
     },
 
@@ -52,18 +125,43 @@ function withGeminiModelFailover(models: Model[]): Model {
       request: ModelRequest
     ): AsyncIterable<ResponseStreamEvent> {
       let lastError: unknown;
+      const deadline = Date.now() + GEMINI_MODEL_FAILOVER_TIMEOUT_MS;
 
       for (let index = 0; index < models.length; index += 1) {
+        const remainingMs = deadline - Date.now();
+        if (remainingMs <= 0) break;
+
+        const timeoutSignal = AbortSignal.timeout(
+          Math.min(GEMINI_MODEL_REQUEST_TIMEOUT_MS, remainingMs)
+        );
+        const signal = request.signal
+          ? AbortSignal.any([request.signal, timeoutSignal])
+          : timeoutSignal;
         const events: ResponseStreamEvent[] = [];
         try {
-          for await (const event of models[index].getStreamedResponse(request)) {
+          for await (const event of models[index].getStreamedResponse({
+            ...request,
+            signal,
+          })) {
             events.push(event);
           }
           yield* events;
           return;
         } catch (error) {
+          if (request.signal?.aborted) throw error;
+
+          const timedOut = timeoutSignal.aborted;
           lastError = error;
-          if (!isRetryableGeminiError(error) || index === models.length - 1) {
+          if (
+            (!timedOut && !isRetryableGeminiError(error)) ||
+            index === models.length - 1
+          ) {
+            if (timedOut) {
+              throw Object.assign(
+                new Error("Gemini model request timed out. Please try again."),
+                { status: 503 }
+              );
+            }
             throw error;
           }
           console.warn(
@@ -72,6 +170,14 @@ function withGeminiModelFailover(models: Model[]): Model {
         }
       }
 
+      if (Date.now() >= deadline) {
+        throw Object.assign(
+          new Error(
+            "Gemini models did not respond within 45 seconds. Please try again shortly."
+          ),
+          { status: 503 }
+        );
+      }
       throw lastError;
     },
   };

@@ -3,7 +3,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { auth, currentUser } from "@clerk/nextjs/server";
 import { db } from "@/db";
 import { AgentConfig, agentRuns } from "@/db/schema";
-import { eq, desc } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
+import { getNextScheduledOccurrence } from "@/lib/inngest/schedule-utils";
 
 export const runtime = "nodejs";
 
@@ -233,6 +234,10 @@ Do not wrap response in markdown blocks.`;
 
     const parsedConfig = JSON.parse(responseText);
     const generatedAgentId = `agent_${Math.random().toString(36).substring(2, 11)}`;
+    const schedule = {
+      ...(parsedConfig.schedule || { type: "recurring", frequency: "daily", time: "09:00" }),
+      timezone: body.timezone || "UTC",
+    };
 
     const newAgentRecord = {
       userEmail,
@@ -244,7 +249,7 @@ Do not wrap response in markdown blocks.`;
       objective: prompt,
       tools: parsedConfig.suggestedTools || [],
       skills: [],
-      schedule: parsedConfig.schedule || { type: "recurring", frequency: "daily" },
+      schedule,
       outputFormat: "text",
       status: "active",
       createdAt: new Date(),
@@ -254,17 +259,18 @@ Do not wrap response in markdown blocks.`;
     // Save agent config record to PostgreSQL database
     await db.insert(AgentConfig).values(newAgentRecord as any);
 
-    // If scheduled or recurring, insert initial run into agentRuns table
-    const firstRunDate = new Date(Date.now() + 5 * 60 * 1000); // 5 minutes from now for initial scheduled execution
-    await db.insert(agentRuns).values({
-      agentId: generatedAgentId,
-      userEmail,
-      status: "scheduled",
-      scheduledFor: firstRunDate,
-      input: parsedConfig.instructions || prompt,
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    });
+    const firstRunDate = getNextScheduledOccurrence(schedule, new Date());
+    if (firstRunDate) {
+      await db.insert(agentRuns).values({
+        agentId: generatedAgentId,
+        userEmail,
+        status: "scheduled",
+        scheduledFor: firstRunDate,
+        input: parsedConfig.instructions || prompt,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+    }
 
     return NextResponse.json(
       {
@@ -311,6 +317,24 @@ export async function PUT(req: NextRequest) {
       "outputFormat",
       "status",
     ] as const;
+    const user = await currentUser();
+    const userEmail =
+      user?.primaryEmailAddress?.emailAddress || `user_${userId}@app.com`;
+    const [existingAgent] = await db
+      .select()
+      .from(AgentConfig)
+      .where(
+        and(
+          eq(AgentConfig.agentId, agentId),
+          eq(AgentConfig.userEmail, userEmail)
+        )
+      )
+      .limit(1);
+
+    if (!existingAgent) {
+      return NextResponse.json({ error: "Agent not found" }, { status: 404 });
+    }
+
     const updateFields = Object.fromEntries(
       editableFields
         .filter((field) => Object.hasOwn(body, field))
@@ -324,14 +348,58 @@ export async function PUT(req: NextRequest) {
       );
     }
 
+    const shouldReplan =
+      Object.hasOwn(body, "schedule") || Object.hasOwn(body, "status");
+    const effectiveSchedule =
+      (updateFields.schedule as typeof existingAgent.schedule | undefined) ||
+      existingAgent.schedule;
+    const effectiveStatus = updateFields.status || existingAgent.status;
+    const nextScheduledFor =
+      shouldReplan && effectiveStatus === "active"
+        ? getNextScheduledOccurrence(effectiveSchedule, new Date())
+        : null;
+
     const [updatedAgent] = await db
       .update(AgentConfig)
       .set(updateFields)
-      .where(eq(AgentConfig.agentId, agentId))
+      .where(
+        and(
+          eq(AgentConfig.agentId, agentId),
+          eq(AgentConfig.userEmail, userEmail)
+        )
+      )
       .returning();
 
     if (!updatedAgent) {
       return NextResponse.json({ error: "Agent not found" }, { status: 404 });
+    }
+
+    if (shouldReplan) {
+      await db
+        .update(agentRuns)
+        .set({
+          status: "cancelled",
+          error: "Schedule changed or agent paused.",
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(agentRuns.agentId, agentId),
+            inArray(agentRuns.status, ["scheduled", "queued"])
+          )
+        );
+
+      if (nextScheduledFor) {
+        await db.insert(agentRuns).values({
+          agentId,
+          userEmail,
+          status: "scheduled",
+          scheduledFor: nextScheduledFor,
+          input: updatedAgent.objective || updatedAgent.instructions,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        });
+      }
     }
 
     return NextResponse.json({ success: true, agentId, ...updateFields }, { status: 200 });
@@ -360,10 +428,35 @@ export async function DELETE(req: NextRequest) {
       return NextResponse.json({ error: "agentId is required" }, { status: 400 });
     }
 
+    const user = await currentUser();
+    const userEmail =
+      user?.primaryEmailAddress?.emailAddress || `user_${userId}@app.com`;
+    const [ownedAgent] = await db
+      .select({ agentId: AgentConfig.agentId })
+      .from(AgentConfig)
+      .where(
+        and(
+          eq(AgentConfig.agentId, agentId),
+          eq(AgentConfig.userEmail, userEmail)
+        )
+      )
+      .limit(1);
+
+    if (!ownedAgent) {
+      return NextResponse.json({ error: "Agent not found" }, { status: 404 });
+    }
+
     // Delete associated runs first
     await db.delete(agentRuns).where(eq(agentRuns.agentId, agentId));
     // Delete agent config
-    await db.delete(AgentConfig).where(eq(AgentConfig.agentId, agentId));
+    await db
+      .delete(AgentConfig)
+      .where(
+        and(
+          eq(AgentConfig.agentId, agentId),
+          eq(AgentConfig.userEmail, userEmail)
+        )
+      );
 
     return NextResponse.json({ success: true, deletedAgentId: agentId }, { status: 200 });
   } catch (err: any) {

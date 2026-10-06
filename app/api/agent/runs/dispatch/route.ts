@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import { auth } from "@clerk/nextjs/server";
+import { auth, currentUser } from "@clerk/nextjs/server";
 import { db } from "@/db";
-import { agentRuns } from "@/db/schema";
-import { eq, and, lte, asc } from "drizzle-orm";
+import { agentRuns, AgentConfig } from "@/db/schema";
+import { eq, and, lte, asc, inArray } from "drizzle-orm";
 import { inngest } from "@/lib/inngest/client";
 
 export const runtime = "nodejs";
@@ -15,17 +15,30 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    const windowMinutes = 60;
-    const targetTime = new Date(Date.now() + windowMinutes * 60 * 1000);
+    const user = await currentUser();
+    const userEmail =
+      user?.primaryEmailAddress?.emailAddress || `user_${userId}@app.com`;
+    const ownedAgents = await db
+      .select({ agentId: AgentConfig.agentId })
+      .from(AgentConfig)
+      .where(eq(AgentConfig.userEmail, userEmail));
+    const ownedAgentIds = ownedAgents.map((agent) => agent.agentId);
+    if (ownedAgentIds.length === 0) {
+      return NextResponse.json({
+        message: "No scheduled runs found for your agents.",
+        dispatchedCount: 0,
+      });
+    }
 
-    // 1. Find upcoming runs due within 60 minutes
+    // 1. Find this user's runs that are due now.
     const runs = await db
       .select()
       .from(agentRuns)
       .where(
         and(
           eq(agentRuns.status, "scheduled"),
-          lte(agentRuns.scheduledFor, targetTime)
+          lte(agentRuns.scheduledFor, new Date()),
+          inArray(agentRuns.agentId, ownedAgentIds)
         )
       )
       .orderBy(asc(agentRuns.scheduledFor))
@@ -33,13 +46,36 @@ export async function POST(req: NextRequest) {
 
     if (runs.length === 0) {
       return NextResponse.json({
-        message: "No scheduled runs due within the next hour found.",
+        message: "No scheduled runs are due yet.",
         dispatchedCount: 0,
       });
     }
 
-    // 2. Send events to Inngest Event Queue (Step 3)
-    const events = runs.map((run) => ({
+    const claimedRuns = [];
+    const queuedAt = new Date();
+    for (const run of runs) {
+      const [claimedRun] = await db
+        .update(agentRuns)
+        .set({
+          status: "queued",
+          queuedAt,
+          inngestEventId: `agent-run-${run.id}`,
+          updatedAt: queuedAt,
+        })
+        .where(and(eq(agentRuns.id, run.id), eq(agentRuns.status, "scheduled")))
+        .returning();
+      if (claimedRun) claimedRuns.push(claimedRun);
+    }
+
+    if (claimedRuns.length === 0) {
+      return NextResponse.json({
+        message: "No scheduled runs are due yet.",
+        dispatchedCount: 0,
+      });
+    }
+
+    // 2. Send claimed runs to the Inngest event queue.
+    const events = claimedRuns.map((run) => ({
       name: "agent/run.scheduled" as const,
       data: {
         runId: run.id,
@@ -52,33 +88,35 @@ export async function POST(req: NextRequest) {
       id: `agent-run-${run.id}`,
     }));
 
-    const eventResult = await inngest.send(events);
-    const now = new Date();
-
-    // 3. Finalize current runs in PostgreSQL (Step 5: scheduled -> queued)
-    for (let i = 0; i < runs.length; i++) {
-      const run = runs[i];
-      const inngestEventId = eventResult.ids[i] || `evt_${run.id}`;
-
-      await db
-        .update(agentRuns)
-        .set({
-          status: "queued",
-          queuedAt: now,
-          inngestEventId,
-          updatedAt: now,
-        })
-        .where(
-          and(
-            eq(agentRuns.id, run.id),
-            eq(agentRuns.status, "scheduled") // Guard against overwriting cancelled runs
-          )
-        );
+    let eventResult;
+    try {
+      eventResult = await inngest.send(events);
+    } catch (error) {
+      await Promise.all(
+        claimedRuns.map((run) =>
+          db
+            .update(agentRuns)
+            .set({
+              status: "scheduled",
+              queuedAt: null,
+              inngestEventId: null,
+              updatedAt: new Date(),
+            })
+            .where(
+              and(
+                eq(agentRuns.id, run.id),
+                eq(agentRuns.status, "queued"),
+                eq(agentRuns.inngestEventId, `agent-run-${run.id}`)
+              )
+            )
+        )
+      );
+      throw error;
     }
 
     return NextResponse.json({
-      message: `Successfully dispatched ${runs.length} upcoming run(s) to Inngest queue.`,
-      dispatchedCount: runs.length,
+      message: `Successfully dispatched ${claimedRuns.length} due run(s) to Inngest queue.`,
+      dispatchedCount: claimedRuns.length,
       eventIds: eventResult.ids,
     });
   } catch (error: any) {

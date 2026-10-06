@@ -2,11 +2,11 @@ import { NextRequest, NextResponse } from "next/server";
 import { auth, currentUser } from "@clerk/nextjs/server";
 import { db } from "@/db";
 import { agentRuns, AgentConfig } from "@/db/schema";
-import { eq, desc } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 
 export const runtime = "nodejs";
 
-// GET: Fetch runs for an agent or all runs for the user (auto-syncs active agents)
+// GET: Fetch runs belonging to the signed-in user's agents.
 export async function GET(req: NextRequest) {
   try {
     const { userId } = await auth();
@@ -16,50 +16,43 @@ export async function GET(req: NextRequest) {
 
     const { searchParams } = new URL(req.url);
     const agentId = searchParams.get("agentId");
-
-    // Auto-sync: ensure all active AgentConfig records have at least one scheduled run in agentRuns
-    const activeAgents = await db
-      .select()
+    const user = await currentUser();
+    const userEmail =
+      user?.primaryEmailAddress?.emailAddress || `user_${userId}@app.com`;
+    const ownedAgents = await db
+      .select({ agentId: AgentConfig.agentId })
       .from(AgentConfig)
-      .where(eq(AgentConfig.status, "active"));
+      .where(eq(AgentConfig.userEmail, userEmail));
+    const ownedAgentIds = ownedAgents.map((agent) => agent.agentId);
 
-    for (const agent of activeAgents) {
-      const existingRuns = await db
-        .select()
-        .from(agentRuns)
-        .where(eq(agentRuns.agentId, agent.agentId))
-        .limit(1);
-
-      if (existingRuns.length === 0) {
-        // Create initial scheduled run for this active agent
-        const scheduledTime = new Date(Date.now() + 10 * 60 * 1000); // scheduled 10 mins from now
-        await db.insert(agentRuns).values({
-          agentId: agent.agentId,
-          userEmail: agent.userEmail,
-          status: "scheduled",
-          scheduledFor: scheduledTime,
-          input: agent.objective || agent.instructions,
-          createdAt: new Date(),
-          updatedAt: new Date(),
-        });
-      }
+    if (agentId && !ownedAgentIds.includes(agentId)) {
+      return NextResponse.json({ error: "Agent not found" }, { status: 404 });
     }
 
-    let runs;
+    if (ownedAgentIds.length === 0) {
+      return NextResponse.json({ runs: [] });
+    }
+
+    const filters = agentId
+      ? and(eq(agentRuns.agentId, agentId), inArray(agentRuns.agentId, ownedAgentIds))
+      : inArray(agentRuns.agentId, ownedAgentIds);
     if (agentId) {
-      runs = await db
+      const runs = await db
         .select()
         .from(agentRuns)
-        .where(eq(agentRuns.agentId, agentId))
+        .where(filters)
         .orderBy(desc(agentRuns.scheduledFor))
         .limit(50);
-    } else {
-      runs = await db
-        .select()
-        .from(agentRuns)
-        .orderBy(desc(agentRuns.scheduledFor))
-        .limit(50);
+
+      return NextResponse.json({ runs });
     }
+
+    const runs = await db
+        .select()
+        .from(agentRuns)
+        .where(filters)
+        .orderBy(desc(agentRuns.scheduledFor))
+        .limit(50);
 
     return NextResponse.json({ runs });
   } catch (error: any) {
@@ -82,24 +75,35 @@ export async function POST(req: NextRequest) {
     const body = await req.json();
     const { agentId, scheduledFor, input } = body;
 
-    if (!agentId) {
+    if (typeof agentId !== "string" || !agentId.trim()) {
       return NextResponse.json({ error: "agentId is required" }, { status: 400 });
     }
 
+    const user = await currentUser();
+    const userEmail =
+      user?.primaryEmailAddress?.emailAddress || `user_${userId}@app.com`;
     const agentConfigs = await db
       .select()
       .from(AgentConfig)
-      .where(eq(AgentConfig.agentId, agentId))
+      .where(
+        and(
+          eq(AgentConfig.agentId, agentId),
+          eq(AgentConfig.userEmail, userEmail)
+        )
+      )
       .limit(1);
 
     if (agentConfigs.length === 0) {
       return NextResponse.json({ error: "Agent not found" }, { status: 404 });
     }
 
-    const user = await currentUser();
-    const userEmail = user?.primaryEmailAddress?.emailAddress || agentConfigs[0].userEmail;
-
     const runDate = scheduledFor ? new Date(scheduledFor) : new Date(Date.now() + 5 * 60 * 1000);
+    if (!Number.isFinite(runDate.getTime()) || runDate <= new Date()) {
+      return NextResponse.json(
+        { error: "scheduledFor must be a valid future date and time." },
+        { status: 400 }
+      );
+    }
 
     const [newRun] = await db
       .insert(agentRuns)
@@ -108,7 +112,10 @@ export async function POST(req: NextRequest) {
         userEmail,
         status: "scheduled",
         scheduledFor: runDate,
-        input: input || agentConfigs[0].objective,
+        input:
+          typeof input === "string" && input.trim()
+            ? input.trim()
+            : agentConfigs[0].objective || agentConfigs[0].instructions,
         createdAt: new Date(),
         updatedAt: new Date(),
       })

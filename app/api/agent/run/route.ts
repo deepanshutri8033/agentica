@@ -4,6 +4,7 @@ import { db } from "@/db";
 import { AgentConfig } from "@/db/schema";
 import { and, eq } from "drizzle-orm";
 import { executeAgent, type AgentChatTurn } from "@/lib/execute-agent";
+import { isGeminiQuotaError } from "@/lib/build-agent";
 
 export async function POST(req: NextRequest) {
   try {
@@ -80,7 +81,8 @@ export async function POST(req: NextRequest) {
     const isInsufficientQuota =
       error?.code === "credit_balance_exhausted" ||
       error?.error?.code === "credit_balance_exhausted" ||
-      error?.error?.type === "insufficient_quota";
+      error?.error?.type === "insufficient_quota" ||
+      isGeminiQuotaError(error);
 
     if (isInsufficientQuota) {
       const provider =
@@ -91,7 +93,9 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(
         {
           error:
-            `The ${providerName} API account has no available quota. Check its API billing and quota settings to run agents.`,
+            provider === "gemini"
+              ? "Gemini API quota is exhausted for this project. Wait until the quota resets, enable billing, or use another Gemini project with available quota."
+              : `The ${providerName} API account has no available quota. Check its API billing and quota settings to run agents.`,
         },
         { status: 429 }
       );
@@ -101,6 +105,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(
         {
           error:
+            error?.message ||
             "Gemini is temporarily overloaded. Please wait a little and try again.",
         },
         { status: 503 }

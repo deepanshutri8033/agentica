@@ -2,8 +2,12 @@ import { inngest } from "./client";
 import { db } from "@/db";
 import { agentRuns, AgentConfig } from "@/db/schema";
 import { eq, and, lte, asc } from "drizzle-orm";
-import { calculateNextOccurrence } from "./schedule-utils";
+import {
+  calculateNextOccurrence,
+  getNextScheduledOccurrence,
+} from "./schedule-utils";
 import { executeAgent } from "@/lib/execute-agent";
+import { isGeminiQuotaError } from "@/lib/build-agent";
 
 // =========================================================================
 // FUNCTION 1: Dispatch Upcoming Agent Runs (Cron Job)
@@ -14,13 +18,12 @@ export const dispatchUpcomingRuns = (inngest as any).createFunction(
     id: "dispatch-upcoming-agent-runs",
     name: "Groovi AI — Dispatch Upcoming Agent Runs",
     retries: 3,
-    triggers: [{ cron: "*/15 * * * *" }],
+    triggers: [{ cron: "* * * * *" }],
   },
   async ({ step }: { step: any }) => {
     // Step 2: Find Upcoming Runs in PostgreSQL
-    const upcomingRuns = await step.run("find-upcoming-runs", async () => {
-      const windowMinutes = 60;
-      const targetTime = new Date(Date.now() + windowMinutes * 60 * 1000);
+    const upcomingRuns = await step.run("claim-due-runs", async () => {
+      const targetTime = new Date();
 
       const runs = await db
         .select()
@@ -34,17 +37,35 @@ export const dispatchUpcomingRuns = (inngest as any).createFunction(
         .orderBy(asc(agentRuns.scheduledFor))
         .limit(100);
 
-      return runs.map((r) => ({
-        id: r.id,
-        agentId: r.agentId,
-        userEmail: r.userEmail,
-        input: r.input,
-        scheduledFor: r.scheduledFor.toISOString(),
-      }));
+      const claimed = [];
+      for (const run of runs) {
+        const now = new Date();
+        const [claimedRun] = await db
+          .update(agentRuns)
+          .set({
+            status: "queued",
+            queuedAt: now,
+            inngestEventId: `agent-run-${run.id}`,
+            updatedAt: now,
+          })
+          .where(and(eq(agentRuns.id, run.id), eq(agentRuns.status, "scheduled")))
+          .returning();
+
+        if (claimedRun) {
+          claimed.push({
+            id: claimedRun.id,
+            agentId: claimedRun.agentId,
+            userEmail: claimedRun.userEmail,
+            input: claimedRun.input,
+            scheduledFor: claimedRun.scheduledFor.toISOString(),
+          });
+        }
+      }
+      return claimed;
     });
 
     if (!upcomingRuns || upcomingRuns.length === 0) {
-      return { message: "No upcoming agent runs found due within 60 minutes." };
+      return { message: "No scheduled agent runs are due." };
     }
 
     // Step 3: Send Future Events to Inngest Event Queue
@@ -62,35 +83,30 @@ export const dispatchUpcomingRuns = (inngest as any).createFunction(
         id: `agent-run-${run.id}`,
       }));
 
-      const response = await inngest.send(events);
-      return { ids: response.ids, count: events.length };
-    });
-
-    // Step 5: Finalize Current Runs in PostgreSQL
-    await step.run("finalize-current-runs", async () => {
-      const runIdsToFinalize = upcomingRuns.map((r: any) => r.id);
-      if (runIdsToFinalize.length === 0) return;
-
-      const now = new Date();
-
-      for (let i = 0; i < upcomingRuns.length; i++) {
-        const run = upcomingRuns[i];
-        const eventId = sendResult.ids[i] || `evt_${run.id}`;
-
-        await db
-          .update(agentRuns)
-          .set({
-            status: "queued",
-            queuedAt: now,
-            inngestEventId: eventId,
-            updatedAt: now,
-          })
-          .where(
-            and(
-              eq(agentRuns.id, run.id),
-              eq(agentRuns.status, "scheduled")
-            )
-          );
+      try {
+        const response = await inngest.send(events);
+        return { ids: response.ids, count: events.length };
+      } catch (error) {
+        await Promise.all(
+          upcomingRuns.map((run: any) =>
+            db
+              .update(agentRuns)
+              .set({
+                status: "scheduled",
+                queuedAt: null,
+                inngestEventId: null,
+                updatedAt: new Date(),
+              })
+              .where(
+                and(
+                  eq(agentRuns.id, run.id),
+                  eq(agentRuns.status, "queued"),
+                  eq(agentRuns.inngestEventId, `agent-run-${run.id}`)
+                )
+              )
+          )
+        );
+        throw error;
       }
     });
 
@@ -123,6 +139,20 @@ export const executeScheduledAgentRun = (inngest as any).createFunction(
 
     // Step 6: Check Latest AgentConfig
     const configCheck = await step.run("check-latest-agent-config", async () => {
+      const [runRecord] = await db
+        .select()
+        .from(agentRuns)
+        .where(eq(agentRuns.id, runId))
+        .limit(1);
+
+      if (!runRecord || runRecord.status !== "queued") {
+        return {
+          active: false,
+          reason: `Run is no longer queued (status: ${runRecord?.status || "missing"})`,
+          config: null,
+        };
+      }
+
       const configs = await db
         .select()
         .from(AgentConfig)
@@ -164,9 +194,16 @@ export const executeScheduledAgentRun = (inngest as any).createFunction(
     // Step 7: Check recurring schedule & Create Next Occurrence
     await step.run("create-next-occurrence", async () => {
       const schedule = agentConfig.schedule;
-      const nextRunDate = calculateNextOccurrence(new Date(scheduledFor), schedule);
+      const nextRunDate =
+        schedule?.type?.toLowerCase() === "recurring"
+          ? calculateNextOccurrence(new Date(scheduledFor), schedule)
+          : null;
+      const nextOccurrence =
+        nextRunDate && nextRunDate <= new Date()
+          ? getNextScheduledOccurrence(schedule, new Date())
+          : nextRunDate;
 
-      if (nextRunDate) {
+      if (nextOccurrence) {
         const existingNextRun = await db
           .select()
           .from(agentRuns)
@@ -174,7 +211,7 @@ export const executeScheduledAgentRun = (inngest as any).createFunction(
             and(
               eq(agentRuns.agentId, agentId),
               eq(agentRuns.status, "scheduled"),
-              eq(agentRuns.scheduledFor, nextRunDate)
+              eq(agentRuns.scheduledFor, nextOccurrence)
             )
           )
           .limit(1);
@@ -184,7 +221,7 @@ export const executeScheduledAgentRun = (inngest as any).createFunction(
             agentId: agentId,
             userEmail: userEmail || agentConfig.userEmail,
             status: "scheduled",
-            scheduledFor: nextRunDate,
+            scheduledFor: nextOccurrence,
             input: input || agentConfig.objective,
             createdAt: new Date(),
             updatedAt: new Date(),
@@ -195,14 +232,24 @@ export const executeScheduledAgentRun = (inngest as any).createFunction(
 
     // Step 8: Final execution of Current Agent Run
     const runResult = await step.run("execute-agent-task", async () => {
-      await db
+      const [claimedRun] = await db
         .update(agentRuns)
         .set({
           status: "running",
           executedAt: new Date(),
           updatedAt: new Date(),
         })
-        .where(eq(agentRuns.id, runId));
+        .where(
+          and(
+            eq(agentRuns.id, runId),
+            eq(agentRuns.status, "queued")
+          )
+        )
+        .returning({ id: agentRuns.id });
+
+      if (!claimedRun) {
+        return { success: false, skipped: true, reason: "Run is no longer queued." };
+      }
 
       try {
         const effectiveUserEmail = userEmail || agentConfig.userEmail || "system@groovi-ai.com";
@@ -238,13 +285,17 @@ export const executeScheduledAgentRun = (inngest as any).createFunction(
           })
           .where(eq(agentRuns.id, runId));
 
+        if (isGeminiQuotaError(err)) {
+          return { success: false, error: errorMsg, retryable: false };
+        }
+
         throw new Error(`Agent execution failed: ${errorMsg}`);
       }
     });
 
     return {
       runId,
-      status: "completed",
+      status: runResult.success ? "completed" : "failed",
       result: runResult,
     };
   }

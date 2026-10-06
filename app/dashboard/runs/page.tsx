@@ -38,6 +38,41 @@ interface AgentConfig {
   description: string;
 }
 
+function AgentAvatar({
+  agent,
+}: {
+  agent?: AgentConfig;
+}) {
+  const imageUrl =
+    agent?.agentImage && !agent.agentImage.includes("/default-agent.png")
+      ? agent.agentImage
+      : null;
+  const fallbackUrl = `https://api.dicebear.com/10.x/micah/svg?seed=${encodeURIComponent(
+    agent?.name || agent?.agentId || "agent"
+  )}`;
+  const [useFallback, setUseFallback] = useState(!imageUrl);
+  const [imageFailed, setImageFailed] = useState(false);
+
+  if (imageFailed) {
+    return <Bot className="h-4 w-4 text-slate-500" />;
+  }
+
+  return (
+    <img
+      src={useFallback ? fallbackUrl : imageUrl!}
+      alt=""
+      className="h-full w-full object-cover"
+      onError={() => {
+        if (!useFallback) {
+          setUseFallback(true);
+        } else {
+          setImageFailed(true);
+        }
+      }}
+    />
+  );
+}
+
 function formatRelativeOrDate(dateStr: string | null) {
   if (!dateStr) return "—";
   const date = new Date(dateStr);
@@ -222,15 +257,7 @@ export default function AgentRunsPage() {
                         <td className="py-4 px-6 font-medium text-slate-900">
                           <div className="flex items-center gap-3">
                             <div className="h-8 w-8 rounded-xl bg-slate-100 border flex items-center justify-center shrink-0 overflow-hidden">
-                              {agent?.agentImage ? (
-                                <img
-                                  src={agent.agentImage}
-                                  alt=""
-                                  className="h-5 w-5 object-contain"
-                                />
-                              ) : (
-                                <Bot className="h-4 w-4 text-slate-500" />
-                              )}
+                              <AgentAvatar agent={agent} />
                             </div>
                             <span className="font-semibold text-sm truncate max-w-[160px]">
                               {agentName}
